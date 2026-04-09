@@ -8,8 +8,24 @@ import json
 import os
 from pathlib import Path
 
-DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
+# Canonical user-local MemPalace directory. All palace data (vector
+# store, trie index, knowledge graph, config, identity) lives under
+# here by default. Expressed as a :class:`Path` so callers that need
+# subpaths don't keep calling ``expanduser``.
+DEFAULT_MEMPALACE_DIR: Path = Path("~/.mempalace").expanduser()
+DEFAULT_PALACE_PATH = str(DEFAULT_MEMPALACE_DIR / "palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
+
+# Embedding model defaults. Zero-touch for existing palaces: the
+# properties fall back to these when the config.json keys are missing.
+DEFAULT_EMBEDDING_MODEL = "default"
+DEFAULT_ENABLED_EMBEDDING_MODELS = ["default"]
+
+# HNSW search-time effort. Chroma's built-in default is 10 (very
+# conservative). Bumping to 40 buys ~90% → ~98% recall at ~3× query
+# cost — sub-10 ms absolute for palaces of ~100k drawers. Users who
+# want the absolute ceiling can set it to 80+ in config.json.
+DEFAULT_HNSW_EF_SEARCH = 40
 
 DEFAULT_TOPIC_WINGS = [
     "emotions",
@@ -75,16 +91,14 @@ class MempalaceConfig:
             config_dir: Override config directory (useful for testing).
                         Defaults to ~/.mempalace.
         """
-        self._config_dir = (
-            Path(config_dir) if config_dir else Path(os.path.expanduser("~/.mempalace"))
-        )
+        self._config_dir = Path(config_dir) if config_dir else DEFAULT_MEMPALACE_DIR
         self._config_file = self._config_dir / "config.json"
         self._people_map_file = self._config_dir / "people_map.json"
         self._file_config = {}
 
         if self._config_file.exists():
             try:
-                with open(self._config_file, "r") as f:
+                with open(self._config_file) as f:
                     self._file_config = json.load(f)
             except (json.JSONDecodeError, OSError):
                 self._file_config = {}
@@ -107,7 +121,7 @@ class MempalaceConfig:
         """Mapping of name variants to canonical names."""
         if self._people_map_file.exists():
             try:
-                with open(self._people_map_file, "r") as f:
+                with open(self._people_map_file) as f:
                     return json.load(f)
             except (json.JSONDecodeError, OSError):
                 pass
@@ -122,6 +136,119 @@ class MempalaceConfig:
     def hall_keywords(self):
         """Mapping of hall names to keyword lists."""
         return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
+
+    @property
+    def default_embedding_model(self):
+        """Slug of the embedding model used when ``--model`` is not given.
+
+        Resolution order:
+          1. Env var ``MEMPALACE_EMBEDDING_MODEL``
+          2. ``default_embedding_model`` in ``config.json``
+          3. Module default ``"default"`` (Chroma built-in ONNX mini-lm)
+        """
+        env_val = os.environ.get("MEMPALACE_EMBEDDING_MODEL")
+        if env_val:
+            return env_val
+        return self._file_config.get("default_embedding_model", DEFAULT_EMBEDDING_MODEL)
+
+    @property
+    def enabled_embedding_models(self):
+        """List of embedding model slugs the palace uses.
+
+        Used by status/fan-out to know which collections to iterate.
+        Missing key in ``config.json`` falls back to ``["default"]`` so
+        existing palaces continue to work unchanged.
+        """
+        return list(
+            self._file_config.get("enabled_embedding_models", DEFAULT_ENABLED_EMBEDDING_MODELS)
+        )
+
+    @property
+    def hnsw_ef_search(self) -> int:
+        """HNSW search-time ef parameter passed to Chroma on collection open.
+
+        Chroma's built-in default is 10. We ship with 40 because
+        published HNSW practice shows ~90% → ~98% recall improvement
+        for ~3× query cost. Users who want maximum recall can set this
+        to 80 or 128 in ``config.json`` under the key ``hnsw_ef_search``.
+        Takes effect on the next ``palace_io.open_collection`` call.
+        """
+        env_val = os.environ.get("MEMPALACE_HNSW_EF_SEARCH")
+        if env_val:
+            try:
+                return int(env_val)
+            except ValueError:
+                pass
+        return int(self._file_config.get("hnsw_ef_search", DEFAULT_HNSW_EF_SEARCH))
+
+    @property
+    def fan_out_max_workers(self) -> int:
+        """Thread pool size for the ``--model all`` RRF fan-out path.
+
+        The fan-out runs one ``_hybrid_search_single`` call per enabled
+        model in parallel. Caps at 8 by default to avoid oversubscribing
+        Chroma's SQLite metadata store on large palaces. The actual
+        worker count is ``min(this, len(enabled_embedding_models))`` so
+        there's never more threads than work.
+        """
+        env_val = os.environ.get("MEMPALACE_FAN_OUT_MAX_WORKERS")
+        if env_val:
+            try:
+                return int(env_val)
+            except ValueError:
+                pass
+        return int(self._file_config.get("fan_out_max_workers", 8))
+
+    @property
+    def default_rerank_mode(self) -> str | None:
+        """Default cross-encoder reranker slug for search, or None.
+
+        When set, every search call that doesn't explicitly pass
+        ``rerank=`` will use this reranker automatically. Useful for
+        users who've installed one of the optional extras
+        (``rerank-provence`` or ``rerank-bge``) and want it always-on.
+        ``None`` (default) preserves the legacy no-rerank behavior
+        byte-for-byte.
+        """
+        env_val = os.environ.get("MEMPALACE_DEFAULT_RERANK_MODE")
+        if env_val:
+            return env_val if env_val != "none" else None
+        val = self._file_config.get("default_rerank_mode")
+        return val if val and val != "none" else None
+
+    @property
+    def rerank_provence_prune(self) -> bool:
+        """Whether the Provence reranker should emit pruned_text by default.
+
+        Only meaningful when ``default_rerank_mode == "provence"``.
+        Users who want reranking without per-token pruning can set this
+        to False.
+        """
+        return bool(self._file_config.get("rerank_provence_prune", True))
+
+    def save_embedding_config(self, *, default=None, enabled=None):
+        """Persist ``default_embedding_model`` / ``enabled_embedding_models``.
+
+        Used by ``mempalace models enable/disable/set-default``. Merges
+        into whatever config.json exists, creating it if missing. Other
+        keys are preserved.
+        """
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        current = {}
+        if self._config_file.exists():
+            try:
+                with open(self._config_file) as f:
+                    current = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                current = {}
+        if default is not None:
+            current["default_embedding_model"] = default
+        if enabled is not None:
+            current["enabled_embedding_models"] = list(enabled)
+        with open(self._config_file, "w") as f:
+            json.dump(current, f, indent=2)
+        self._file_config = current
+        return self._config_file
 
     def init(self):
         """Create config directory and write default config.json if it doesn't exist."""

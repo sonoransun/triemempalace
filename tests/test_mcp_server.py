@@ -192,6 +192,60 @@ class TestSearchTool:
         assert all(r["room"] == "backend" for r in result["results"])
 
 
+# ── Hybrid Search Tool ──────────────────────────────────────────────────
+
+
+class TestHybridSearchTool:
+    def test_hybrid_keyword_only(
+        self, monkeypatch, config, palace_path, seeded_collection, seeded_trie, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_hybrid_search
+
+        result = tool_hybrid_search(query="", keywords=["jwt"])
+        assert "results" in result
+        assert len(result["results"]) == 1
+        assert "JWT" in result["results"][0]["text"]
+
+    def test_hybrid_combined(
+        self, monkeypatch, config, palace_path, seeded_collection, seeded_trie, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_hybrid_search
+
+        result = tool_hybrid_search(query="authentication", keywords=["jwt"])
+        assert len(result["results"]) >= 1
+        assert "JWT" in result["results"][0]["text"]
+
+    def test_hybrid_temporal(
+        self, monkeypatch, config, palace_path, seeded_collection, seeded_trie, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_hybrid_search
+
+        result = tool_hybrid_search(query="", since="2026-01-03T00:00:00")
+        texts = " | ".join(r["text"] for r in result["results"])
+        # Only ccc and ddd filed on/after 2026-01-03
+        assert "JWT" not in texts
+
+    def test_hybrid_tool_listed(self):
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request({"method": "tools/list", "id": 99, "params": {}})
+        names = {t["name"] for t in resp["result"]["tools"]}
+        assert "mempalace_hybrid_search" in names
+
+    def test_status_exposes_trie_stats(
+        self, monkeypatch, config, palace_path, seeded_collection, seeded_trie, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_status
+
+        result = tool_status()
+        assert "trie" in result
+        assert result["trie"].get("postings", 0) > 0
+
+
 # ── Write Tools ─────────────────────────────────────────────────────────
 
 
@@ -212,6 +266,15 @@ class TestWriteTools:
         assert result["room"] == "test_room"
         assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
 
+        # The trie must have been updated alongside the Chroma upsert.
+        # Re-use the MCP server's cached TrieIndex so we don't open a
+        # second LMDB env on the same path.
+        from mempalace.mcp_server import _get_trie_index
+
+        trie = _get_trie_index()
+        assert result["drawer_id"] in trie.lookup("decorators")
+        assert result["drawer_id"] in trie.lookup("metaclasses")
+
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
@@ -226,13 +289,26 @@ class TestWriteTools:
         assert result2["success"] is True
         assert result2["reason"] == "already_exists"
 
-    def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
+    def test_delete_drawer(
+        self, monkeypatch, config, palace_path, seeded_collection, seeded_trie, kg
+    ):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_delete_drawer
+
+        # Sanity: the trie starts with this drawer indexed under "jwt".
+        assert "drawer_proj_backend_aaa" in seeded_trie.lookup("jwt")
 
         result = tool_delete_drawer("drawer_proj_backend_aaa")
         assert result["success"] is True
         assert seeded_collection.count() == 3
+
+        # After deletion the trie must forget the drawer as well.
+        import os
+
+        from mempalace.trie_index import TrieIndex
+
+        trie = TrieIndex(db_path=os.path.join(palace_path, "trie_index.sqlite3"))
+        assert "drawer_proj_backend_aaa" not in trie.lookup("jwt")
 
     def test_delete_drawer_not_found(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -319,7 +395,7 @@ class TestDiaryTools:
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
-        from mempalace.mcp_server import tool_diary_write, tool_diary_read
+        from mempalace.mcp_server import tool_diary_read, tool_diary_write
 
         w = tool_diary_write(
             agent_name="TestAgent",

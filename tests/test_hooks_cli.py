@@ -7,20 +7,19 @@ from unittest.mock import patch
 import pytest
 
 from mempalace.hooks_cli import (
+    PRECOMPACT_BLOCK_REASON,
     SAVE_INTERVAL,
     STOP_BLOCK_REASON,
-    PRECOMPACT_BLOCK_REASON,
     _count_human_messages,
     _log,
     _maybe_auto_ingest,
     _parse_harness_input,
     _sanitize_session_id,
-    hook_stop,
-    hook_session_start,
     hook_precompact,
+    hook_session_start,
+    hook_stop,
     run_hook,
 )
-
 
 # --- _sanitize_session_id ---
 

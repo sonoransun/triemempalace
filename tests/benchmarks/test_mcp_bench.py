@@ -17,7 +17,6 @@ import pytest
 from tests.benchmarks.data_generator import PalaceDataGenerator
 from tests.benchmarks.report import record_metric
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -51,10 +50,9 @@ def _get_rss_mb():
 
         return psutil.Process().memory_info().rss / (1024 * 1024)
     except ImportError:
-        import resource
-
         # ru_maxrss is in KB on Linux, bytes on macOS
         import platform
+        import resource
 
         usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if platform.system() == "Darwin":

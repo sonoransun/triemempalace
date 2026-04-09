@@ -20,7 +20,6 @@ from mempalace.cli import (
     main,
 )
 
-
 # ── cmd_status ─────────────────────────────────────────────────────────
 
 
@@ -49,12 +48,38 @@ def test_cmd_status_custom_palace(mock_config_cls):
 # ── cmd_search ─────────────────────────────────────────────────────────
 
 
+def _search_args(**overrides):
+    """Build a search-subcommand Namespace with all trie/temporal/model/compress flags defaulted."""
+    defaults = dict(
+        palace=None,
+        query="test query",
+        wing=None,
+        room=None,
+        results=5,
+        keyword=[],
+        keyword_prefix=[],
+        since=None,
+        until=None,
+        as_of=None,
+        warm_trie=False,
+        model=None,
+        compress="auto",
+        token_budget=None,
+        dup_threshold=0.7,
+        sent_threshold=0.75,
+        novelty_threshold=0.2,
+        rerank="none",
+        rerank_prune=True,
+        enable_kg_ppr=False,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_search_calls_search(mock_config_cls):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(
-        palace=None, query="test query", wing="mywing", room="myroom", results=3
-    )
+    args = _search_args(query="test query", wing="mywing", room="myroom", results=3)
     with patch("mempalace.searcher.search") as mock_search:
         cmd_search(args)
         mock_search.assert_called_once_with(
@@ -63,13 +88,27 @@ def test_cmd_search_calls_search(mock_config_cls):
             wing="mywing",
             room="myroom",
             n_results=3,
+            keywords=None,
+            keyword_mode="all",
+            since=None,
+            until=None,
+            as_of=None,
+            model=None,
+            compress="auto",
+            token_budget=None,
+            dup_threshold=0.7,
+            sent_threshold=0.75,
+            novelty_threshold=0.2,
+            rerank=None,
+            rerank_prune=True,
+            enable_kg_ppr=False,
         )
 
 
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_search_error_exits(mock_config_cls):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, query="q", wing=None, room=None, results=5)
+    args = _search_args(query="q")
     from mempalace.searcher import SearchError
 
     with patch("mempalace.searcher.search", side_effect=SearchError("fail")):
@@ -162,6 +201,7 @@ def test_cmd_mine_projects_mode(mock_config_cls):
         no_gitignore=False,
         include_ignored=[],
         extract="exchange",
+        model=None,
     )
     with patch("mempalace.miner.mine") as mock_mine:
         cmd_mine(args)
@@ -174,6 +214,7 @@ def test_cmd_mine_projects_mode(mock_config_cls):
             dry_run=False,
             respect_gitignore=True,
             include_ignored=[],
+            model=None,
         )
 
 
@@ -191,6 +232,7 @@ def test_cmd_mine_convos_mode(mock_config_cls):
         no_gitignore=False,
         include_ignored=[],
         extract="general",
+        model=None,
     )
     with patch("mempalace.convo_miner.mine_convos") as mock_mine:
         cmd_mine(args)
@@ -202,6 +244,7 @@ def test_cmd_mine_convos_mode(mock_config_cls):
             limit=10,
             dry_run=True,
             extract_mode="general",
+            model=None,
         )
 
 

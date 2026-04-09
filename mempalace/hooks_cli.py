@@ -6,12 +6,13 @@ Supported hooks: session-start, stop, precompact
 Supported harnesses: claude-code, codex (extensible to cursor, gemini, etc.)
 """
 
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 SAVE_INTERVAL = 15
@@ -75,7 +76,7 @@ def _log(message: str):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         log_path = STATE_DIR / "hook.log"
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now(UTC).strftime("%H:%M:%S")
         with open(log_path, "a") as f:
             f.write(f"[{timestamp}] {message}\n")
     except OSError:
@@ -90,7 +91,7 @@ def _output(data: dict):
 def _maybe_auto_ingest():
     """If MEMPAL_DIR is set and exists, run mempalace mine in background."""
     mempal_dir = os.environ.get("MEMPAL_DIR", "")
-    if mempal_dir and os.path.isdir(mempal_dir):
+    if mempal_dir and Path(mempal_dir).is_dir():
         try:
             log_path = STATE_DIR / "hook.log"
             with open(log_path, "a") as log_f:
@@ -149,10 +150,8 @@ def hook_stop(data: dict, harness: str):
 
     if since_last >= SAVE_INTERVAL and exchange_count > 0:
         # Update last save point
-        try:
+        with contextlib.suppress(OSError):
             last_save_file.write_text(str(exchange_count), encoding="utf-8")
-        except OSError:
-            pass
 
         _log(f"TRIGGERING SAVE at exchange {exchange_count}")
 
@@ -187,7 +186,7 @@ def hook_precompact(data: dict, harness: str):
 
     # Optional: auto-ingest synchronously before compaction (so memories land first)
     mempal_dir = os.environ.get("MEMPAL_DIR", "")
-    if mempal_dir and os.path.isdir(mempal_dir):
+    if mempal_dir and Path(mempal_dir).is_dir():
         try:
             log_path = STATE_DIR / "hook.log"
             with open(log_path, "a") as log_f:

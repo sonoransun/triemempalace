@@ -194,7 +194,7 @@ def split_file(filepath, output_dir, dry_run=False):
     out_dir = Path(output_dir) if output_dir else path.parent
     written = []
 
-    for i, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+    for i, (start, end) in enumerate(zip(boundaries, boundaries[1:], strict=False)):
         chunk = lines[start:end]
         if len(chunk) < 10:
             continue  # Skip tiny fragments
@@ -260,10 +260,7 @@ def main():
     src_dir = Path(args.source) if args.source else LUMI_DIR
     output_dir = args.output_dir or None  # None = same dir as file
 
-    if args.file:
-        files = [Path(args.file)]
-    else:
-        files = sorted(src_dir.glob("*.txt"))
+    files = [Path(args.file)] if args.file else sorted(src_dir.glob("*.txt"))
 
     mega_files = []
     for f in files:

@@ -11,9 +11,10 @@ No internet. No API key. Your files stay on your machine.
 
 import os
 import sys
-import yaml
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
+import yaml
 
 # Common room patterns — detected from folder names and filenames
 # Format: {folder_keyword: room_name}
@@ -103,7 +104,7 @@ def detect_rooms_from_folders(project_dir: str) -> list:
     project_path = Path(project_dir).expanduser().resolve()
     found_rooms = {}
 
-    SKIP_DIRS = {
+    skip_dirs = {
         ".git",
         "node_modules",
         "__pycache__",
@@ -118,7 +119,7 @@ def detect_rooms_from_folders(project_dir: str) -> list:
 
     # Check top-level directories first (most reliable signal)
     for item in project_path.iterdir():
-        if item.is_dir() and item.name not in SKIP_DIRS:
+        if item.is_dir() and item.name not in skip_dirs:
             name_lower = item.name.lower().replace("-", "_")
             if name_lower in FOLDER_ROOM_MAP:
                 room_name = FOLDER_ROOM_MAP[name_lower]
@@ -132,9 +133,9 @@ def detect_rooms_from_folders(project_dir: str) -> list:
 
     # Walk one level deeper for nested patterns
     for item in project_path.iterdir():
-        if item.is_dir() and item.name not in SKIP_DIRS:
+        if item.is_dir() and item.name not in skip_dirs:
             for subitem in item.iterdir():
-                if subitem.is_dir() and subitem.name not in SKIP_DIRS:
+                if subitem.is_dir() and subitem.name not in skip_dirs:
                     name_lower = subitem.name.lower().replace("-", "_")
                     if name_lower in FOLDER_ROOM_MAP:
                         room_name = FOLDER_ROOM_MAP[name_lower]
@@ -173,10 +174,10 @@ def detect_rooms_from_files(project_dir: str) -> list:
     project_path = Path(project_dir).expanduser().resolve()
     keyword_counts = defaultdict(int)
 
-    SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
-    for root, dirs, filenames in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+    for _root, dirs, filenames in os.walk(project_path):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
         for filename in filenames:
             name_lower = filename.lower().replace("-", "_").replace(" ", "_")
             for keyword, room in FOLDER_ROOM_MAP.items():
@@ -303,8 +304,5 @@ def detect_rooms_local(project_dir: str, yes: bool = False):
         source = "fallback (flat project)"
 
     print_proposed_structure(project_name, rooms, len(files), source)
-    if yes:
-        approved_rooms = rooms
-    else:
-        approved_rooms = get_user_approval(rooms)
+    approved_rooms = rooms if yes else get_user_approval(rooms)
     save_config(project_dir, project_name, approved_rooms)

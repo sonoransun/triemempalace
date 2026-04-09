@@ -34,6 +34,26 @@ If MCP tools are available, use them in this priority order:
   between two wings. Use when the user asks about relationships between
   different knowledge domains.
 
+## 3b. Choose the embedding model (optional)
+
+If the palace has multiple embedding models enabled, every MCP search
+tool accepts an optional `model` parameter:
+
+- Omit → use the palace default (matches how the palace was mined)
+- `model="jina-code-v2"` → search only the code-specialized collection
+- `model="nomic-text-v1.5"` → search only the long-context collection
+- `model="all"` → fan out across every enabled model and merge with
+  Reciprocal Rank Fusion. Best recall for cross-domain queries.
+  Automatically deduplicates drawers that surface in multiple collections.
+
+Call `mempalace_list_models` first to see which models are installed and
+enabled — each entry carries a `description` field that hints at its
+intended workload (code, long conversations, MTEB quality, etc.).
+
+Writes (`mempalace_add_drawer`, `mempalace_diary_write`) reject
+`model="all"` — always pass a concrete slug for writes. See
+docs/MODEL_SELECTION.md for the full decision table.
+
 ## 4. CLI Fallback
 
 If MCP tools are not available, fall back to the CLI:

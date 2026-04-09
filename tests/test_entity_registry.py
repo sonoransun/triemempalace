@@ -8,7 +8,6 @@ from mempalace.entity_registry import (
     EntityRegistry,
 )
 
-
 # ── COMMON_ENGLISH_WORDS ────────────────────────────────────────────────
 
 

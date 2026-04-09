@@ -15,7 +15,6 @@ from mempalace.entity_detector import (
     score_entity,
 )
 
-
 # ── extract_candidates ──────────────────────────────────────────────────
 
 

@@ -18,20 +18,25 @@ Tools (write):
 """
 
 import argparse
-import os
-import sys
+import hashlib
 import json
 import logging
-import hashlib
-from datetime import datetime
+import os
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
+import chromadb.errors
+import lmdb
+
+from . import embeddings as _embeddings
 from .config import MempalaceConfig
-from .version import __version__
-from .searcher import search_memories
-from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
-
 from .knowledge_graph import KnowledgeGraph
+from .palace_graph import find_tunnels, graph_stats, traverse
+from .palace_io import open_collection
+from .searcher import hybrid_search, search_memories
+from .trie_index import TrieIndex, trie_db_path
+from .version import __version__
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -53,32 +58,50 @@ def _parse_args():
 _args = _parse_args()
 
 if _args.palace:
-    os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
+    os.environ["MEMPALACE_PALACE_PATH"] = str(Path(_args.palace).expanduser().absolute())
 
 _config = MempalaceConfig()
 if _args.palace:
-    _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
+    _kg = KnowledgeGraph(db_path=str(Path(_config.palace_path) / "knowledge_graph.sqlite3"))
 else:
     _kg = KnowledgeGraph()
 
 
+# Per-process caches. _collection_cache is now a dict keyed on the
+# resolved model slug so tools can switch collections per call without
+# re-opening. Cleared by tests via `_reset_mcp_cache` in conftest.py.
 _client_cache = None
-_collection_cache = None
+_collection_cache: dict[str, object] = {}
+_trie_cache = None
 
 
-def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
-    global _client_cache, _collection_cache
+def _get_collection(create=False, *, model=None):
+    """Return the ChromaDB collection bound to ``model`` (defaulting to
+    the palace's configured default model).
+
+    Caches one collection handle per (palace_path, model_slug) so
+    repeat calls from the MCP hot path don't re-open Chroma.
+    """
+    global _collection_cache
+    slug = model if model is not None else _config.default_embedding_model
+    cached = _collection_cache.get(slug)
+    if cached is not None:
+        return cached
     try:
-        if _client_cache is None:
-            _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-        if create:
-            _collection_cache = _client_cache.get_or_create_collection(_config.collection_name)
-        elif _collection_cache is None:
-            _collection_cache = _client_cache.get_collection(_config.collection_name)
-        return _collection_cache
-    except Exception:
+        col = open_collection(_config.palace_path, model=slug, create=create)
+    except (OSError, chromadb.errors.ChromaError) as e:
+        logger.debug("mcp: collection open failed (model=%s) — %s", slug, e)
         return None
+    _collection_cache[slug] = col
+    return col
+
+
+def _get_trie_index():
+    """Return a cached ``TrieIndex`` rooted at the current palace path."""
+    global _trie_cache
+    if _trie_cache is None:
+        _trie_cache = TrieIndex(db_path=trie_db_path(_config.palace_path))
+    return _trie_cache
 
 
 def _no_palace():
@@ -91,7 +114,7 @@ def _no_palace():
 # ==================== READ TOOLS ====================
 
 
-def tool_status():
+def tool_status() -> dict:
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -105,16 +128,120 @@ def tool_status():
             r = m.get("room", "unknown")
             wings[w] = wings.get(w, 0) + 1
             rooms[r] = rooms.get(r, 0) + 1
-    except Exception:
-        pass
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_status: metadata scan failed — %s", e)
+
+    trie_stats = {}
+    try:
+        trie_stats = _get_trie_index().stats()
+    except (lmdb.Error, OSError, RuntimeError) as e:
+        logger.debug("tool_status: trie stats failed — %s", e)
+
+    # Per-model drawer counts. Iterate every enabled model and count
+    # drawers in its collection; skip silently if the collection doesn't
+    # exist yet (user hasn't mined with that model).
+    models_block = []
+    for slug in _config.enabled_embedding_models:
+        try:
+            model_col = _get_collection(model=slug)
+            models_block.append(
+                {
+                    "slug": slug,
+                    "drawers": model_col.count() if model_col is not None else 0,
+                    "default": slug == _config.default_embedding_model,
+                }
+            )
+        except (OSError, chromadb.errors.ChromaError, ValueError) as e:
+            logger.debug("tool_status: model %s count failed — %s", slug, e)
+            models_block.append(
+                {"slug": slug, "drawers": 0, "default": slug == _config.default_embedding_model}
+            )
+
     return {
         "total_drawers": count,
         "wings": wings,
         "rooms": rooms,
         "palace_path": _config.palace_path,
+        "trie": trie_stats,
+        "models": models_block,
+        "default_model": _config.default_embedding_model,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
+
+
+def tool_list_models() -> dict:
+    """Return the full embedding-model registry with install/enable flags.
+
+    For each spec, report whether the required optional extras are
+    installed in the current Python environment, whether the slug is
+    in the palace's ``enabled_embedding_models`` list, and how many
+    drawers live in its collection.
+    """
+    enabled = set(_config.enabled_embedding_models)
+    default_slug = _config.default_embedding_model
+    out = []
+    for spec in _embeddings.list_specs():
+        drawer_count = 0
+        if spec.slug in enabled:
+            try:
+                col = _get_collection(model=spec.slug)
+                drawer_count = col.count() if col is not None else 0
+            except (OSError, chromadb.errors.ChromaError, ValueError) as e:
+                logger.debug("tool_list_models: %s count failed — %s", spec.slug, e)
+                drawer_count = 0
+        out.append(
+            {
+                "slug": spec.slug,
+                "display_name": spec.display_name,
+                "description": spec.description,
+                "backend": spec.backend,
+                "model_id": spec.model_id,
+                "dimension": spec.dimension,
+                "context_tokens": spec.context_tokens,
+                "extras_required": list(spec.extras_required),
+                "installed": _embeddings.is_installed(spec),
+                "enabled": spec.slug in enabled,
+                "is_default": spec.slug == default_slug,
+                "drawers": drawer_count,
+                "supports_matryoshka": getattr(spec, "supports_matryoshka", False),
+                "truncate_dim": getattr(spec, "truncate_dim", None),
+            }
+        )
+    return {"models": out, "default_model": default_slug}
+
+
+def tool_list_rerankers() -> dict:
+    """Return the full reranker registry with install + pruning flags.
+
+    Each entry reports whether the required optional extras are
+    installed, whether the reranker supports per-token pruning
+    (currently only Provence), and carries a human-readable
+    description the AI can use to decide which reranker to pass as
+    ``rerank=<slug>`` on subsequent search calls.
+
+    Gracefully handles the case where neither ``rerank-provence`` nor
+    ``rerank-bge`` is installed — returns the registry with
+    ``installed=False`` for every spec so the AI knows what to suggest.
+    """
+    from . import rerank as _rerank_module
+
+    out = []
+    for spec in _rerank_module.list_reranker_specs():
+        out.append(
+            {
+                "slug": spec.slug,
+                "display_name": spec.display_name,
+                "description": spec.description,
+                "backend": spec.backend,
+                "model_id": spec.model_id,
+                "max_length": spec.max_length,
+                "supports_pruning": spec.supports_pruning,
+                "extras_required": list(spec.extras_required),
+                "installed": _rerank_module.is_installed(spec),
+            }
+        )
+    return {"rerankers": out}
 
 
 # ── AAAK Dialect Spec ─────────────────────────────────────────────────────────
@@ -150,7 +277,7 @@ Read AAAK naturally — expand codes mentally, treat *markers* as emotional cont
 When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
-def tool_list_wings():
+def tool_list_wings() -> dict:
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -160,12 +287,12 @@ def tool_list_wings():
         for m in all_meta:
             w = m.get("wing", "unknown")
             wings[w] = wings.get(w, 0) + 1
-    except Exception:
-        pass
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_list_wings: metadata scan failed — %s", e)
     return {"wings": wings}
 
 
-def tool_list_rooms(wing: str = None):
+def tool_list_rooms(wing: str = None) -> dict:
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -178,12 +305,12 @@ def tool_list_rooms(wing: str = None):
         for m in all_meta:
             r = m.get("room", "unknown")
             rooms[r] = rooms.get(r, 0) + 1
-    except Exception:
-        pass
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_list_rooms: metadata scan failed — %s", e)
     return {"wing": wing or "all", "rooms": rooms}
 
 
-def tool_get_taxonomy():
+def tool_get_taxonomy() -> dict:
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -196,22 +323,130 @@ def tool_get_taxonomy():
             if w not in taxonomy:
                 taxonomy[w] = {}
             taxonomy[w][r] = taxonomy[w].get(r, 0) + 1
-    except Exception:
-        pass
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_get_taxonomy: metadata scan failed — %s", e)
     return {"taxonomy": taxonomy}
 
 
-def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
+def tool_search(
+    query: str,
+    limit: int = 5,
+    wing: str = None,
+    room: str = None,
+    model: str = None,
+    compress: str = "auto",
+    token_budget: int = None,
+    dup_threshold: float = 0.7,
+    sent_threshold: float = 0.75,
+    novelty_threshold: float = 0.2,
+    rerank: str = None,
+    rerank_prune: bool = True,
+    kg_ppr: bool = False,
+):
+    """Semantic search against a single model's collection.
+
+    ``model`` unset = palace default. ``model="all"`` runs RRF fan-out
+    across every enabled model and returns fused results. ``compress``
+    selects the result-compression mode (auto/none/dedupe/sentences/
+    aggressive); defaults to dedupe on fan-out and none otherwise.
+    ``rerank`` (optional: "provence" / "bge") runs a cross-encoder
+    reranker over the Chroma hits before compression — see
+    ``mempalace_list_rerankers`` for install status. ``kg_ppr=True``
+    turns on HippoRAG-style KG fusion.
+    """
+    if model == "all" or rerank or kg_ppr:
+        # Any rerank/ppr invocation goes through hybrid_search because
+        # search_memories strips the extended envelope fields.
+        return hybrid_search(
+            query,
+            palace_path=_config.palace_path,
+            wing=wing,
+            room=room,
+            n_results=limit,
+            model=model,
+            compress=compress,
+            token_budget=token_budget,
+            dup_threshold=dup_threshold,
+            sent_threshold=sent_threshold,
+            novelty_threshold=novelty_threshold,
+            rerank=rerank,
+            rerank_prune=rerank_prune,
+            enable_kg_ppr=kg_ppr,
+        )
     return search_memories(
         query,
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
         n_results=limit,
+        model=model,
+        compress=compress,
+        token_budget=token_budget,
     )
 
 
-def tool_check_duplicate(content: str, threshold: float = 0.9):
+def tool_hybrid_search(
+    query: str = "",
+    keywords: list = None,
+    keyword_mode: str = "all",
+    since: str = None,
+    until: str = None,
+    as_of: str = None,
+    wing: str = None,
+    room: str = None,
+    limit: int = 5,
+    model: str = None,
+    compress: str = "auto",
+    token_budget: int = None,
+    dup_threshold: float = 0.7,
+    sent_threshold: float = 0.75,
+    novelty_threshold: float = 0.2,
+    rerank: str = None,
+    rerank_prune: bool = True,
+    kg_ppr: bool = False,
+):
+    """Keyword + semantic + temporal search.
+
+    Combines the local trie index with the vector store:
+      - ``keywords`` (list of strings, ANDed by default) pre-filters via the
+        trie — exact token match, case-insensitive.
+      - ``since`` / ``until`` (ISO dates) bound the drawer's ``filed_at``.
+      - ``as_of`` (ISO date) returns only drawers whose validity window
+        covers that point in time — same predicate as ``mempalace_kg_query``.
+      - ``query`` (optional) then runs a Chroma vector query over the
+        surviving candidates. Omit ``query`` to get pure keyword/temporal
+        results ordered by ``filed_at`` desc.
+      - ``model`` (optional) selects the embedding model's collection.
+        Unset = palace default. ``"all"`` = RRF fan-out across every
+        enabled model (the trie prefilter runs once then fans out).
+      - ``rerank`` (optional: "provence" / "bge") runs a cross-encoder
+        reranker over the hits before compression. Call
+        ``mempalace_list_rerankers`` to see install status.
+    """
+    return hybrid_search(
+        query or "",
+        palace_path=_config.palace_path,
+        keywords=list(keywords) if keywords else None,
+        keyword_mode=keyword_mode,
+        since=since,
+        until=until,
+        as_of=as_of,
+        wing=wing,
+        room=room,
+        n_results=limit,
+        model=model,
+        compress=compress,
+        token_budget=token_budget,
+        dup_threshold=dup_threshold,
+        sent_threshold=sent_threshold,
+        novelty_threshold=novelty_threshold,
+        rerank=rerank,
+        rerank_prune=rerank_prune,
+        enable_kg_ppr=kg_ppr,
+    )
+
+
+def tool_check_duplicate(content: str, threshold: float = 0.9) -> dict:
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -242,16 +477,17 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
             "is_duplicate": len(duplicates) > 0,
             "matches": duplicates,
         }
-    except Exception as e:
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_check_duplicate failed: %s", e)
         return {"error": str(e)}
 
 
-def tool_get_aaak_spec():
+def tool_get_aaak_spec() -> dict:
     """Return the AAAK dialect specification."""
     return {"aaak_spec": AAAK_SPEC}
 
 
-def tool_traverse_graph(start_room: str, max_hops: int = 2):
+def tool_traverse_graph(start_room: str, max_hops: int = 2) -> dict:
     """Walk the palace graph from a room. Find connected ideas across wings."""
     col = _get_collection()
     if not col:
@@ -259,7 +495,7 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
     return traverse(start_room, col=col, max_hops=max_hops)
 
 
-def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
+def tool_find_tunnels(wing_a: str = None, wing_b: str = None) -> dict:
     """Find rooms that bridge two wings — the hallways connecting domains."""
     col = _get_collection()
     if not col:
@@ -267,7 +503,7 @@ def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
     return find_tunnels(wing_a, wing_b, col=col)
 
 
-def tool_graph_stats():
+def tool_graph_stats() -> dict:
     """Palace graph overview: nodes, tunnels, edges, connectivity."""
     col = _get_collection()
     if not col:
@@ -279,45 +515,64 @@ def tool_graph_stats():
 
 
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = "mcp",
+    model: str = None,
 ):
-    """File verbatim content into a wing/room. Checks for duplicates first."""
-    col = _get_collection(create=True)
+    """File verbatim content into a wing/room. Checks for duplicates first.
+
+    ``model`` (optional) selects which embedding model's collection to
+    write to. Unset = palace default. ``"all"`` is rejected — writes
+    need a concrete destination.
+    """
+    if model == "all":
+        return {"success": False, "error": "model='all' is read-only; pick a concrete slug."}
+    col = _get_collection(create=True, model=model)
     if not col:
         return _no_palace()
 
-    drawer_id = f"drawer_{wing}_{room}_{hashlib.md5(content.encode()).hexdigest()[:16]}"
+    drawer_id = (
+        f"drawer_{wing}_{room}_"
+        f"{hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:16]}"
+    )
 
     # Idempotency: if the deterministic ID already exists, return success as a no-op.
     try:
         existing = col.get(ids=[drawer_id])
         if existing and existing["ids"]:
             return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
-    except Exception:
-        pass
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_add_drawer: idempotency probe failed — %s", e)
 
     try:
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "source_file": source_file or "",
+            "chunk_index": 0,
+            "added_by": added_by,
+            "filed_at": datetime.now(UTC).isoformat(),
+        }
         col.upsert(
             ids=[drawer_id],
             documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
+            metadatas=[metadata],
         )
+        try:
+            _get_trie_index().add_drawer(drawer_id, content, metadata)
+        except (lmdb.Error, OSError, ValueError) as e:
+            logger.warning("Trie index add failed for %s: %s", drawer_id, e)
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
         return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
-    except Exception as e:
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.exception("tool_add_drawer failed")
         return {"success": False, "error": str(e)}
 
 
-def tool_delete_drawer(drawer_id: str):
+def tool_delete_drawer(drawer_id: str) -> dict:
     """Delete a single drawer by ID."""
     col = _get_collection()
     if not col:
@@ -327,16 +582,21 @@ def tool_delete_drawer(drawer_id: str):
         return {"success": False, "error": f"Drawer not found: {drawer_id}"}
     try:
         col.delete(ids=[drawer_id])
+        try:
+            _get_trie_index().delete_drawer(drawer_id)
+        except (lmdb.Error, OSError, ValueError) as e:
+            logger.warning("Trie index delete failed for %s: %s", drawer_id, e)
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
-    except Exception as e:
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.exception("tool_delete_drawer failed")
         return {"success": False, "error": str(e)}
 
 
 # ==================== KNOWLEDGE GRAPH ====================
 
 
-def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
+def tool_kg_query(entity: str, as_of: str = None, direction: str = "both") -> dict:
     """Query the knowledge graph for an entity's relationships."""
     results = _kg.query_entity(entity, as_of=as_of, direction=direction)
     return {"entity": entity, "as_of": as_of, "facts": results, "count": len(results)}
@@ -352,7 +612,7 @@ def tool_kg_add(
     return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
 
 
-def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
+def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None) -> dict:
     """Mark a fact as no longer true (set end date)."""
     _kg.invalidate(subject, predicate, object, ended=ended)
     return {
@@ -362,13 +622,13 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     }
 
 
-def tool_kg_timeline(entity: str = None):
+def tool_kg_timeline(entity: str = None) -> dict:
     """Get chronological timeline of facts, optionally for one entity."""
     results = _kg.timeline(entity)
     return {"entity": entity or "all", "timeline": results, "count": len(results)}
 
 
-def tool_kg_stats():
+def tool_kg_stats() -> dict:
     """Knowledge graph overview: entities, triples, relationship types."""
     return _kg.stats()
 
@@ -376,7 +636,7 @@ def tool_kg_stats():
 # ==================== AGENT DIARY ====================
 
 
-def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
+def tool_diary_write(agent_name: str, entry: str, topic: str = "general") -> dict:
     """
     Write a diary entry for this agent. Each agent gets its own wing
     with a diary room. Entries are timestamped and accumulate over time.
@@ -390,26 +650,30 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
     if not col:
         return _no_palace()
 
-    now = datetime.now()
-    entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
+    now = datetime.now(UTC)
+    entry_hash = hashlib.md5(entry[:50].encode(), usedforsecurity=False).hexdigest()[:8]
+    entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{entry_hash}"
 
     try:
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "hall": "hall_diary",
+            "topic": topic,
+            "type": "diary_entry",
+            "agent": agent_name,
+            "filed_at": now.isoformat(),
+            "date": now.strftime("%Y-%m-%d"),
+        }
         col.add(
             ids=[entry_id],
             documents=[entry],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "hall": "hall_diary",
-                    "topic": topic,
-                    "type": "diary_entry",
-                    "agent": agent_name,
-                    "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"),
-                }
-            ],
+            metadatas=[metadata],
         )
+        try:
+            _get_trie_index().add_drawer(entry_id, entry, metadata)
+        except (lmdb.Error, OSError, ValueError) as e:
+            logger.warning("Trie index add failed for diary entry %s: %s", entry_id, e)
         logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
         return {
             "success": True,
@@ -418,11 +682,12 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
             "topic": topic,
             "timestamp": now.isoformat(),
         }
-    except Exception as e:
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.exception("tool_diary_write failed")
         return {"success": False, "error": str(e)}
 
 
-def tool_diary_read(agent_name: str, last_n: int = 10):
+def tool_diary_read(agent_name: str, last_n: int = 10) -> dict:
     """
     Read an agent's recent diary entries. Returns the last N entries
     in chronological order — the agent's personal journal.
@@ -444,7 +709,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
 
         # Combine and sort by timestamp
         entries = []
-        for doc, meta in zip(results["documents"], results["metadatas"]):
+        for doc, meta in zip(results["documents"], results["metadatas"], strict=False):
             entries.append(
                 {
                     "date": meta.get("date", ""),
@@ -463,7 +728,8 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
             "total": len(results["ids"]),
             "showing": len(entries),
         }
-    except Exception as e:
+    except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+        logger.debug("tool_diary_read failed: %s", e)
         return {"error": str(e)}
 
 
@@ -624,10 +890,206 @@ TOOLS = {
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
                 "wing": {"type": "string", "description": "Filter by wing (optional)"},
                 "room": {"type": "string", "description": "Filter by room (optional)"},
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Embedding model slug (optional). Unset = palace default. "
+                        "Pick by workload: 'jina-code-v2' for source code "
+                        "(CodeSearchNet, 8k context), 'nomic-text-v1.5' for "
+                        "long LLM conversations (8k context), 'mxbai-large' "
+                        "for MTEB-proven general retrieval, 'bge-small-en' "
+                        "for budget general retrieval. Call mempalace_list_models "
+                        "to see install/enable status + per-model descriptions. "
+                        "'all' = RRF fan-out across every enabled model with "
+                        "automatic drawer deduplication (reads only)."
+                    ),
+                },
+                "compress": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "none",
+                        "dedupe",
+                        "sentences",
+                        "aggressive",
+                        "llmlingua2",
+                    ],
+                    "description": (
+                        "Result compression mode: auto (default; dedupe on fan-out, "
+                        "none otherwise), none, dedupe, sentences, aggressive, or "
+                        "llmlingua2 (Microsoft's learned token-level compressor — "
+                        "requires the compress-llmlingua optional extra)."
+                    ),
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "description": (
+                        "Max output tokens (aggressive mode only). Halts ingestion "
+                        "when cumulative output exceeds this value."
+                    ),
+                },
+                "dup_threshold": {
+                    "type": "number",
+                    "description": "Drawer-level Jaccard cutoff for dedupe mode (0..1, default 0.7)",
+                },
+                "sent_threshold": {
+                    "type": "number",
+                    "description": "Sentence-level bigram Jaccard cutoff for sentences mode (0..1, default 0.75)",
+                },
+                "novelty_threshold": {
+                    "type": "number",
+                    "description": "Minimum novel-trigram fraction for aggressive mode (0..1, default 0.2)",
+                },
+                "rerank": {
+                    "type": "string",
+                    "enum": ["none", "provence", "bge"],
+                    "description": (
+                        "Cross-encoder reranker to apply after the vector "
+                        "query. 'provence' (unified rerank + per-token "
+                        "prune) requires the 'rerank-provence' extra. 'bge' "
+                        "(BGE-reranker-v2-m3 via fastembed, no torch) "
+                        "requires the 'rerank-bge' extra. Call "
+                        "mempalace_list_rerankers for install status."
+                    ),
+                },
+                "rerank_prune": {
+                    "type": "boolean",
+                    "description": (
+                        "When rerank='provence', write pruned_text into "
+                        "each hit (default true). Ignored for other "
+                        "rerankers or when rerank is unset."
+                    ),
+                },
+                "kg_ppr": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable HippoRAG-style Personalized PageRank "
+                        "fusion over the knowledge graph. Extracts "
+                        "proper nouns from the query, runs PPR seeded "
+                        "on those entities, and unions the top-ranked "
+                        "drawers into the vector candidate set. "
+                        "Requires the KG to be populated via "
+                        "mempalace mine --extract-kg or mempalace "
+                        "kg-extract."
+                    ),
+                },
             },
             "required": ["query"],
         },
         "handler": tool_search,
+    },
+    "mempalace_hybrid_search": {
+        "description": (
+            "Hybrid search over the palace: keyword (local trie) + semantic "
+            "(ChromaDB) + temporal. Keywords are ANDed by default. "
+            "`since`/`until` bound the drawer's filed_at; `as_of` returns "
+            "drawers whose validity window covers that date. Omit `query` "
+            "to get pure keyword/temporal results ordered by filed_at desc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Semantic query (optional — omit for pure keyword/temporal)",
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Keywords to require (exact tokens, case-insensitive)",
+                },
+                "keyword_mode": {
+                    "type": "string",
+                    "description": "all (AND, default), any (OR), or prefix (AND on prefix match)",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Only drawers filed on or after this date (ISO)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Only drawers filed on or before this date (ISO)",
+                },
+                "as_of": {
+                    "type": "string",
+                    "description": "Point-in-time — validity window must cover this date",
+                },
+                "wing": {"type": "string", "description": "Filter by wing (optional)"},
+                "room": {"type": "string", "description": "Filter by room (optional)"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Embedding model slug (optional). Unset = palace default. "
+                        "Pick by workload: 'jina-code-v2' for source code "
+                        "(CodeSearchNet, 8k context), 'nomic-text-v1.5' for "
+                        "long LLM conversations (8k context), 'mxbai-large' "
+                        "for MTEB-proven general retrieval, 'bge-small-en' "
+                        "for budget general retrieval. Call mempalace_list_models "
+                        "to see install/enable status + per-model descriptions. "
+                        "'all' = RRF fan-out across every enabled model with "
+                        "automatic drawer deduplication (reads only)."
+                    ),
+                },
+                "compress": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "none",
+                        "dedupe",
+                        "sentences",
+                        "aggressive",
+                        "llmlingua2",
+                    ],
+                    "description": (
+                        "Result compression mode: auto (default; dedupe on fan-out, "
+                        "none otherwise), none, dedupe, sentences, aggressive, or "
+                        "llmlingua2 (Microsoft's learned token-level compressor — "
+                        "requires the compress-llmlingua optional extra)."
+                    ),
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "description": "Max output tokens (aggressive mode only).",
+                },
+                "dup_threshold": {
+                    "type": "number",
+                    "description": "Drawer-level Jaccard cutoff for dedupe mode (0..1, default 0.7)",
+                },
+                "sent_threshold": {
+                    "type": "number",
+                    "description": "Sentence-level bigram Jaccard cutoff (0..1, default 0.75)",
+                },
+                "novelty_threshold": {
+                    "type": "number",
+                    "description": "Minimum novel-trigram fraction for aggressive mode (0..1, default 0.2)",
+                },
+                "rerank": {
+                    "type": "string",
+                    "enum": ["none", "provence", "bge"],
+                    "description": (
+                        "Cross-encoder reranker to apply after the vector "
+                        "query. 'provence' unified rerank + pruning or "
+                        "'bge' pure rerank. Call mempalace_list_rerankers "
+                        "for install status."
+                    ),
+                },
+                "rerank_prune": {
+                    "type": "boolean",
+                    "description": (
+                        "When rerank='provence', enable per-token pruning (default true)."
+                    ),
+                },
+                "kg_ppr": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable HippoRAG PPR fusion over the knowledge "
+                        "graph. See mempalace_search for full details."
+                    ),
+                },
+            },
+        },
+        "handler": tool_hybrid_search,
     },
     "mempalace_check_duplicate": {
         "description": "Check if content already exists in the palace before filing",
@@ -660,10 +1122,50 @@ TOOLS = {
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Embedding model slug (optional). Unset = palace default. "
+                        "Pick by workload: 'jina-code-v2' for source code, "
+                        "'nomic-text-v1.5' for long LLM conversations, "
+                        "'mxbai-large' for MTEB-proven retrieval. Call "
+                        "mempalace_list_models for per-model descriptions. "
+                        "'all' is rejected on writes — pick a concrete slug."
+                    ),
+                },
             },
             "required": ["wing", "room", "content"],
         },
         "handler": tool_add_drawer,
+    },
+    "mempalace_list_models": {
+        "description": (
+            "List every embedding model in the registry with its install "
+            "status (optional extras present), enable status (in config), "
+            "default flag, drawer count per collection, and a description "
+            "field you can use to pick the right model for the user's "
+            "workload (e.g. 'jina-code-v2' for code repos, 'nomic-text-v1.5' "
+            "for long LLM conversations, 'mxbai-large' for MTEB-proven "
+            "general retrieval). Call this before suggesting a specific "
+            "--model or before recommending `mempalace models enable <slug>`."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_list_models,
+    },
+    "mempalace_list_rerankers": {
+        "description": (
+            "List every cross-encoder reranker registered in MemPalace "
+            "with its install status and pruning support. Two rerankers "
+            "ship: 'provence' (unified rerank + per-token context prune "
+            "via DeBERTa-v3, ICLR 2025 — requires the 'rerank-provence' "
+            "extra) and 'bge' (BAAI/bge-reranker-v2-m3 via fastembed "
+            "ONNX, no torch — requires the 'rerank-bge' extra). Call "
+            "this before suggesting rerank=<slug> on mempalace_search or "
+            "mempalace_hybrid_search. Each entry carries a description "
+            "field so you can match the reranker to the workload."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_list_rerankers,
     },
     "mempalace_delete_drawer": {
         "description": "Delete a drawer by ID. Irreversible.",
@@ -775,6 +1277,9 @@ def handle_request(request):
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             }
         except Exception:
+            # Broad catch: this is the MCP protocol boundary. Any exception
+            # from any handler must be translated to a JSON-RPC error so the
+            # server doesn't crash mid-session. Full traceback is logged.
             logger.exception(f"Tool error in {tool_name}")
             return {
                 "jsonrpc": "2.0",
@@ -791,6 +1296,21 @@ def handle_request(request):
 
 def main():
     logger.info("MemPalace MCP Server starting...")
+
+    # Warm the trie bitmap LRU on startup so the first query for any hot
+    # token hits the in-process cache instead of paying the ~5–10 μs
+    # LMDB read + deserialize cost. The MCP server is long-lived so the
+    # one-time ~20–50 ms warmup is amortized over thousands of queries.
+    # Non-fatal: if the palace or trie doesn't exist yet, skip silently.
+    try:
+        trie = _get_trie_index()
+        if trie is not None:
+            loaded = trie.warm()
+            if loaded:
+                logger.info(f"Trie warm: loaded {loaded} hot bitmaps")
+    except (lmdb.Error, OSError, ValueError) as e:
+        logger.debug(f"Trie warm skipped: {e}")
+
     while True:
         try:
             line = sys.stdin.readline()
@@ -806,8 +1326,17 @@ def main():
                 sys.stdout.flush()
         except KeyboardInterrupt:
             break
+        except json.JSONDecodeError as e:
+            logger.error(f"MCP protocol error: malformed JSON on stdin: {e}")
+        except (OSError, BrokenPipeError) as e:
+            logger.error(f"MCP I/O error: {e}")
+            break
         except Exception as e:
-            logger.error(f"Server error: {e}")
+            # Broad catch: the main stdin loop must never crash — keep the
+            # server alive so the MCP client can retry. Any uncaught error
+            # from handle_request bubbles up here and is surfaced as a log
+            # line.
+            logger.exception(f"Server error: {e}")
 
 
 if __name__ == "__main__":

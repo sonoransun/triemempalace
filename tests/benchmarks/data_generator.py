@@ -16,7 +16,6 @@ from pathlib import Path
 import chromadb
 import yaml
 
-
 # ── Scale configurations ─────────────────────────────────────────────────
 
 SCALE_CONFIGS = {
@@ -388,7 +387,7 @@ class PalaceDataGenerator:
         for i in range(n_files):
             lines = []
             n_exchanges = self.rng.randint(5, 20)
-            for j in range(n_exchanges):
+            for _j in range(n_exchanges):
                 user_msg = f"> User: {self.rng.choice(TECH_TERMS)}? How does {self.rng.choice(TECH_TERMS)} work with {self.rng.choice(TECH_TERMS)}?"
                 ai_msg = self._random_text(200, 600)
                 lines.append(user_msg)
@@ -496,10 +495,7 @@ class PalaceDataGenerator:
         entities = []
         entity_names = []
         for i in range(n_entities):
-            if i < len(ENTITY_NAMES):
-                name = ENTITY_NAMES[i]
-            else:
-                name = f"Entity_{i:04d}"
+            name = ENTITY_NAMES[i] if i < len(ENTITY_NAMES) else f"Entity_{i:04d}"
             etype = self.rng.choice(ENTITY_TYPES)
             entities.append((name, etype))
             entity_names.append(name)

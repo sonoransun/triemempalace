@@ -22,8 +22,8 @@ def _get_rss_mb():
 
         return psutil.Process().memory_info().rss / (1024 * 1024)
     except ImportError:
-        import resource
         import platform
+        import resource
 
         usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if platform.system() == "Darwin":
@@ -78,9 +78,9 @@ class TestToolStatusMemoryProfile:
         palace_path = str(tmp_path / "palace")
         gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)
 
+        import mempalace.mcp_server as mcp_mod
         from mempalace.config import MempalaceConfig
         from mempalace.knowledge_graph import KnowledgeGraph
-        import mempalace.mcp_server as mcp_mod
 
         cfg = MempalaceConfig(config_dir=str(tmp_path / "cfg"))
         monkeypatch.setattr(cfg, "_file_config", {"palace_path": palace_path})
@@ -159,7 +159,7 @@ class TestHeapSnapshot:
         tracemalloc.start()
         snap_before = tracemalloc.take_snapshot()
 
-        for i in range(100):
+        for _i in range(100):
             search_memories("test query", palace_path=palace_path, n_results=5)
 
         snap_after = tracemalloc.take_snapshot()

@@ -16,14 +16,16 @@ Reads directly from ChromaDB (mempalace_drawers)
 and ~/.mempalace/identity.txt.
 """
 
-import os
+import contextlib
+import logging
 import sys
-from pathlib import Path
 from collections import defaultdict
-
-import chromadb
+from pathlib import Path
 
 from .config import MempalaceConfig
+from .palace_io import open_collection
+
+logger = logging.getLogger("mempalace.layers")
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +47,7 @@ class Layer0:
 
     def __init__(self, identity_path: str = None):
         if identity_path is None:
-            identity_path = os.path.expanduser("~/.mempalace/identity.txt")
+            identity_path = str(Path("~/.mempalace/identity.txt").expanduser())
         self.path = identity_path
         self._text = None
 
@@ -54,8 +56,8 @@ class Layer0:
         if self._text is not None:
             return self._text
 
-        if os.path.exists(self.path):
-            with open(self.path, "r") as f:
+        if Path(self.path).exists():
+            with open(self.path) as f:
                 self._text = f.read().strip()
         else:
             self._text = (
@@ -83,30 +85,38 @@ class Layer1:
     MAX_DRAWERS = 15  # at most 15 moments in wake-up
     MAX_CHARS = 3200  # hard cap on total L1 text (~800 tokens)
 
-    def __init__(self, palace_path: str = None, wing: str = None):
+    def __init__(self, palace_path: str = None, wing: str = None, model: str = None):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
         self.wing = wing
+        self.model = model
 
     def generate(self) -> str:
         """Pull top drawers from ChromaDB and format as compact L1 text."""
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
+            col = open_collection(self.palace_path, model=self.model)
+        except Exception as e:
+            # Broad catch: open_collection can raise OSError, ChromaError,
+            # or any backend-specific failure from the embedding model. This
+            # is a read-only "show me the palace" path — we never want to
+            # crash it, we just return a "no palace" message.
+            logger.debug("Layer1.generate: collection open failed — %s", e)
             return "## L1 — No palace found. Run: mempalace mine <dir>"
 
         # Fetch all drawers in batches to avoid SQLite variable limit (~999)
-        _BATCH = 500
+        batch_size = 500
         docs, metas = [], []
         offset = 0
         while True:
-            kwargs = {"include": ["documents", "metadatas"], "limit": _BATCH, "offset": offset}
+            kwargs = {"include": ["documents", "metadatas"], "limit": batch_size, "offset": offset}
             if self.wing:
                 kwargs["where"] = {"wing": self.wing}
             try:
                 batch = col.get(**kwargs)
-            except Exception:
+            except Exception as e:
+                # Broad catch: any error fetching a page stops the loop;
+                # Layer 1 is a "best effort" summary that never fails.
+                logger.debug("Layer1.generate: batch fetch failed — %s", e)
                 break
             batch_docs = batch.get("documents", [])
             batch_metas = batch.get("metadatas", [])
@@ -115,7 +125,7 @@ class Layer1:
             docs.extend(batch_docs)
             metas.extend(batch_metas)
             offset += len(batch_docs)
-            if len(batch_docs) < _BATCH:
+            if len(batch_docs) < batch_size:
                 break
 
         if not docs:
@@ -123,16 +133,14 @@ class Layer1:
 
         # Score each drawer: prefer high importance, recent filing
         scored = []
-        for doc, meta in zip(docs, metas):
+        for doc, meta in zip(docs, metas, strict=False):
             importance = 3
             # Try multiple metadata keys that might carry weight info
             for key in ("importance", "emotional_weight", "weight"):
                 val = meta.get(key)
                 if val is not None:
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         importance = float(val)
-                    except (ValueError, TypeError):
-                        pass
                     break
             scored.append((importance, meta, doc))
 
@@ -155,7 +163,7 @@ class Layer1:
             lines.append(room_line)
             total_len += len(room_line)
 
-            for imp, meta, doc in entries:
+            for _imp, meta, doc in entries:
                 source = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
 
                 # Truncate doc to keep L1 compact
@@ -189,16 +197,19 @@ class Layer2:
     Queries ChromaDB with a wing/room filter.
     """
 
-    def __init__(self, palace_path: str = None):
+    def __init__(self, palace_path: str = None, model: str = None):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
+        self.model = model
 
     def retrieve(self, wing: str = None, room: str = None, n_results: int = 10) -> str:
         """Retrieve drawers filtered by wing and/or room."""
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
+            col = open_collection(self.palace_path, model=self.model)
+        except Exception as e:
+            # Broad catch: same rationale as Layer1.generate — this path is
+            # read-only and should never crash the caller.
+            logger.debug("Layer2.retrieve: collection open failed — %s", e)
             return "No palace found."
 
         where = {}
@@ -216,6 +227,10 @@ class Layer2:
         try:
             results = col.get(**kwargs)
         except Exception as e:
+            # Broad catch: col.get on a mocked collection can raise any
+            # exception type — tests use RuntimeError, production uses
+            # ChromaError. We return a message either way.
+            logger.debug("Layer2.retrieve: col.get failed — %s", e)
             return f"Retrieval error: {e}"
 
         docs = results.get("documents", [])
@@ -228,7 +243,7 @@ class Layer2:
             return f"No drawers found for {label}."
 
         lines = [f"## L2 — ON-DEMAND ({len(docs)} drawers)"]
-        for doc, meta in zip(docs[:n_results], metas[:n_results]):
+        for doc, meta in zip(docs[:n_results], metas[:n_results], strict=False):
             room_name = meta.get("room", "?")
             source = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
             snippet = doc.strip().replace("\n", " ")
@@ -253,16 +268,18 @@ class Layer3:
     Reuses searcher.py logic against mempalace_drawers.
     """
 
-    def __init__(self, palace_path: str = None):
+    def __init__(self, palace_path: str = None, model: str = None):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
+        self.model = model
 
     def search(self, query: str, wing: str = None, room: str = None, n_results: int = 5) -> str:
         """Semantic search, returns compact result text."""
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
+            col = open_collection(self.palace_path, model=self.model)
+        except Exception as e:
+            # Broad catch: read-only search path, never crash.
+            logger.debug("Layer3.search: collection open failed — %s", e)
             return "No palace found."
 
         where = {}
@@ -284,6 +301,9 @@ class Layer3:
         try:
             results = col.query(**kwargs)
         except Exception as e:
+            # Broad catch: col.query on a mocked collection can raise any
+            # exception type.
+            logger.debug("Layer3.search: col.query failed — %s", e)
             return f"Search error: {e}"
 
         docs = results["documents"][0]
@@ -294,7 +314,7 @@ class Layer3:
             return "No results found."
 
         lines = [f'## L3 — SEARCH RESULTS for "{query}"']
-        for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists), 1):
+        for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists, strict=False), 1):
             similarity = round(1 - dist, 3)
             wing_name = meta.get("wing", "?")
             room_name = meta.get("room", "?")
@@ -316,9 +336,10 @@ class Layer3:
     ) -> list:
         """Return raw dicts instead of formatted text."""
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
+            col = open_collection(self.palace_path, model=self.model)
+        except Exception as e:
+            # Broad catch: read-only search path, never crash.
+            logger.debug("Layer3.search_raw: collection open failed — %s", e)
             return []
 
         where = {}
@@ -339,7 +360,10 @@ class Layer3:
 
         try:
             results = col.query(**kwargs)
-        except Exception:
+        except Exception as e:
+            # Broad catch: col.query may raise any exception — tests use
+            # RuntimeError, production uses ChromaError.
+            logger.debug("Layer3.search_raw: col.query failed — %s", e)
             return []
 
         hits = []
@@ -347,6 +371,7 @@ class Layer3:
             results["documents"][0],
             results["metadatas"][0],
             results["distances"][0],
+            strict=False,
         ):
             hits.append(
                 {
@@ -376,15 +401,21 @@ class MemoryStack:
         print(stack.search("pricing change"))  # L3 deep search
     """
 
-    def __init__(self, palace_path: str = None, identity_path: str = None):
+    def __init__(
+        self,
+        palace_path: str = None,
+        identity_path: str = None,
+        model: str = None,
+    ):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
-        self.identity_path = identity_path or os.path.expanduser("~/.mempalace/identity.txt")
+        self.identity_path = identity_path or str(Path("~/.mempalace/identity.txt").expanduser())
+        self.model = model
 
         self.l0 = Layer0(self.identity_path)
-        self.l1 = Layer1(self.palace_path)
-        self.l2 = Layer2(self.palace_path)
-        self.l3 = Layer3(self.palace_path)
+        self.l1 = Layer1(self.palace_path, model=model)
+        self.l2 = Layer2(self.palace_path, model=model)
+        self.l3 = Layer3(self.palace_path, model=model)
 
     def wake_up(self, wing: str = None) -> str:
         """
@@ -421,7 +452,7 @@ class MemoryStack:
             "palace_path": self.palace_path,
             "L0_identity": {
                 "path": self.identity_path,
-                "exists": os.path.exists(self.identity_path),
+                "exists": Path(self.identity_path).exists(),
                 "tokens": self.l0.token_estimate(),
             },
             "L1_essential": {
@@ -437,11 +468,13 @@ class MemoryStack:
 
         # Count drawers
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
+            col = open_collection(self.palace_path, model=getattr(self, "model", None))
             count = col.count()
             result["total_drawers"] = count
-        except Exception:
+        except Exception as e:
+            # Broad catch: status is a read-only overview that must degrade
+            # gracefully when any backend error occurs.
+            logger.debug("MemoryStack.status: count failed — %s", e)
             result["total_drawers"] = 0
 
         return result

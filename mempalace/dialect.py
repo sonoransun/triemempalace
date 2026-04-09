@@ -42,11 +42,8 @@ FLAGS:
 """
 
 import json
-import os
 import re
-from typing import List, Dict, Optional
 from pathlib import Path
-
 
 # === EMOTION CODES (universal) ===
 
@@ -317,7 +314,7 @@ class Dialect:
         dialect.generate_layer1("zettels/", output="LAYER1.aaak")
     """
 
-    def __init__(self, entities: Dict[str, str] = None, skip_names: List[str] = None):
+    def __init__(self, entities: dict[str, str] = None, skip_names: list[str] = None):
         """
         Args:
             entities: Mapping of full names -> short codes.
@@ -342,7 +339,7 @@ class Dialect:
             "skip_names": ["Gandalf", "Sherlock"]
         }
         """
-        with open(config_path, "r") as f:
+        with open(config_path) as f:
             config = json.load(f)
         return cls(
             entities=config.get("entities", {}),
@@ -354,10 +351,7 @@ class Dialect:
         canonical = {}
         seen_codes = set()
         for name, code in self.entity_codes.items():
-            if code not in seen_codes and not name.islower():
-                canonical[name] = code
-                seen_codes.add(code)
-            elif code not in seen_codes:
+            if code not in seen_codes and not name.islower() or code not in seen_codes:
                 canonical[name] = code
                 seen_codes.add(code)
 
@@ -370,7 +364,7 @@ class Dialect:
 
     # === ENCODING (entity/emotion primitives) ===
 
-    def encode_entity(self, name: str) -> Optional[str]:
+    def encode_entity(self, name: str) -> str | None:
         """Convert a person/entity name to its short code."""
         if any(s in name.lower() for s in self.skip_names):
             return None
@@ -384,7 +378,7 @@ class Dialect:
         # Auto-code: first 3 chars uppercase
         return name[:3].upper()
 
-    def encode_emotions(self, emotions: List[str]) -> str:
+    def encode_emotions(self, emotions: list[str]) -> str:
         """Convert emotion list to compact codes."""
         codes = []
         for e in emotions:
@@ -411,7 +405,7 @@ class Dialect:
 
     # === PLAIN TEXT COMPRESSION (new for mempalace) ===
 
-    def _detect_emotions(self, text: str) -> List[str]:
+    def _detect_emotions(self, text: str) -> list[str]:
         """Detect emotions from plain text using keyword signals."""
         text_lower = text.lower()
         detected = []
@@ -422,7 +416,7 @@ class Dialect:
                 seen.add(code)
         return detected[:3]
 
-    def _detect_flags(self, text: str) -> List[str]:
+    def _detect_flags(self, text: str) -> list[str]:
         """Detect importance flags from plain text using keyword signals."""
         text_lower = text.lower()
         detected = []
@@ -433,7 +427,7 @@ class Dialect:
                 seen.add(flag)
         return detected[:3]
 
-    def _extract_topics(self, text: str, max_topics: int = 3) -> List[str]:
+    def _extract_topics(self, text: str, max_topics: int = 3) -> list[str]:
         """Extract key topic words from plain text."""
         # Tokenize: alphanumeric words, lowercase
         words = re.findall(r"[a-zA-Z][a-zA-Z_-]{2,}", text)
@@ -453,9 +447,8 @@ class Dialect:
             if w[0].isupper() and w_lower in freq:
                 freq[w_lower] += 2
             # CamelCase or has underscore/hyphen
-            if "_" in w or "-" in w or (any(c.isupper() for c in w[1:])):
-                if w_lower in freq:
-                    freq[w_lower] += 2
+            if ("_" in w or "-" in w or any(c.isupper() for c in w[1:])) and w_lower in freq:
+                freq[w_lower] += 2
 
         ranked = sorted(freq.items(), key=lambda x: -x[1])
         return [w for w, _ in ranked[:max_topics]]
@@ -513,14 +506,13 @@ class Dialect:
             best = best[:52] + "..."
         return best
 
-    def _detect_entities_in_text(self, text: str) -> List[str]:
+    def _detect_entities_in_text(self, text: str) -> list[str]:
         """Find known entities in text, or detect capitalized names."""
         found = []
         # Check known entities
         for name, code in self.entity_codes.items():
-            if not name.islower() and name.lower() in text.lower():
-                if code not in found:
-                    found.append(code)
+            if not name.islower() and name.lower() in text.lower() and code not in found:
+                found.append(code)
         if found:
             return found
 
@@ -760,7 +752,7 @@ class Dialect:
 
     def compress_file(self, zettel_json_path: str, output_path: str = None) -> str:
         """Read a zettel JSON file and compress it to AAAK Dialect."""
-        with open(zettel_json_path, "r") as f:
+        with open(zettel_json_path) as f:
             data = json.load(f)
         dialect = self.encode_file(data)
         if output_path:
@@ -771,10 +763,10 @@ class Dialect:
     def compress_all(self, zettel_dir: str, output_path: str = None) -> str:
         """Compress ALL zettel files into a single AAAK Dialect file."""
         all_dialect = []
-        for fname in sorted(os.listdir(zettel_dir)):
+        for fname in sorted(p.name for p in Path(zettel_dir).iterdir()):
             if fname.endswith(".json"):
-                fpath = os.path.join(zettel_dir, fname)
-                with open(fpath, "r") as f:
+                fpath = str(Path(zettel_dir) / fname)
+                with open(fpath) as f:
                     data = json.load(f)
                 dialect = self.encode_file(data)
                 all_dialect.append(dialect)
@@ -791,7 +783,7 @@ class Dialect:
         self,
         zettel_dir: str,
         output_path: str = None,
-        identity_sections: Dict[str, List[str]] = None,
+        identity_sections: dict[str, list[str]] = None,
         weight_threshold: float = 0.85,
     ) -> str:
         """
@@ -804,11 +796,11 @@ class Dialect:
 
         essential = []
 
-        for fname in sorted(os.listdir(zettel_dir)):
+        for fname in sorted(p.name for p in Path(zettel_dir).iterdir()):
             if not fname.endswith(".json"):
                 continue
-            fpath = os.path.join(zettel_dir, fname)
-            with open(fpath, "r") as f:
+            fpath = str(Path(zettel_dir) / fname)
+            with open(fpath) as f:
                 data = json.load(f)
 
             file_num = fname.replace("file_", "").replace(".json", "")
@@ -826,11 +818,11 @@ class Dialect:
                     essential.append((z, file_num, source_date))
 
         all_tunnels = []
-        for fname in sorted(os.listdir(zettel_dir)):
+        for fname in sorted(p.name for p in Path(zettel_dir).iterdir()):
             if not fname.endswith(".json"):
                 continue
-            fpath = os.path.join(zettel_dir, fname)
-            with open(fpath, "r") as f:
+            fpath = str(Path(zettel_dir) / fname)
+            with open(fpath) as f:
                 data = json.load(f)
             for t in data.get("tunnels", []):
                 all_tunnels.append(t)
@@ -857,7 +849,7 @@ class Dialect:
 
         for date_key in sorted(by_date.keys()):
             lines.append(f"=MOMENTS[{date_key}]=")
-            for z, fnum in by_date[date_key]:
+            for z, _fnum in by_date[date_key]:
                 entities = []
                 for p in z.get("people", []):
                     code = self.encode_entity(p)
@@ -998,10 +990,7 @@ if __name__ == "__main__":
         args = args[:idx] + args[idx + 2 :]
 
     # Create dialect instance
-    if config_path:
-        dialect = Dialect.from_config(config_path)
-    else:
-        dialect = Dialect()
+    dialect = Dialect.from_config(config_path) if config_path else Dialect()
 
     if args[0] == "--init":
         example = {
@@ -1027,7 +1016,7 @@ if __name__ == "__main__":
 
     elif args[0] == "--all":
         zettel_dir = args[1] if len(args) > 1 else "."
-        output = os.path.join(zettel_dir, "COMPRESSED_MEMORY.aaak")
+        output = str(Path(zettel_dir) / "COMPRESSED_MEMORY.aaak")
         result = dialect.compress_all(zettel_dir, output)
         tokens = Dialect.count_tokens(result)
         print(f"Compressed to: {output}")
@@ -1036,7 +1025,7 @@ if __name__ == "__main__":
         print(result)
 
     elif args[0] == "--stats":
-        with open(args[1], "r") as f:
+        with open(args[1]) as f:
             data = json.load(f)
         json_str = json.dumps(data, indent=2)
         encoded = dialect.encode_file(data)
@@ -1051,7 +1040,7 @@ if __name__ == "__main__":
 
     elif args[0] == "--layer1":
         zettel_dir = args[1] if len(args) > 1 else "."
-        output = os.path.join(zettel_dir, "LAYER1.aaak")
+        output = str(Path(zettel_dir) / "LAYER1.aaak")
         result = dialect.generate_layer1(zettel_dir, output)
         tokens = Dialect.count_tokens(result)
         print(f"Layer 1: {output}")

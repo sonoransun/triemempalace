@@ -15,22 +15,27 @@ Enables queries like:
 No external graph DB needed — built from ChromaDB metadata.
 """
 
-from collections import defaultdict, Counter
-from .config import MempalaceConfig
+import logging
+from collections import Counter, defaultdict
 
 import chromadb
 
+from .config import MempalaceConfig
+from .palace_io import open_collection
 
-def _get_collection(config=None):
+logger = logging.getLogger("mempalace.palace_graph")
+
+
+def _get_collection(config=None, model: str | None = None):
     config = config or MempalaceConfig()
     try:
-        client = chromadb.PersistentClient(path=config.palace_path)
-        return client.get_collection(config.collection_name)
-    except Exception:
+        return open_collection(config.palace_path, model=model)
+    except (OSError, chromadb.errors.ChromaError) as e:
+        logger.debug("palace_graph: collection open failed — %s", e)
         return None
 
 
-def build_graph(col=None, config=None):
+def build_graph(col=None, config=None, *, model: str | None = None):
     """
     Build the palace graph from ChromaDB metadata.
 
@@ -39,7 +44,7 @@ def build_graph(col=None, config=None):
         edges: list of {room, wing_a, wing_b, hall} — one per tunnel crossing
     """
     if col is None:
-        col = _get_collection(config)
+        col = _get_collection(config, model=model)
     if not col:
         return {}, []
 
@@ -96,7 +101,9 @@ def build_graph(col=None, config=None):
     return nodes, edges
 
 
-def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
+def traverse(
+    start_room: str, col=None, config=None, max_hops: int = 2, *, model: str | None = None
+):
     """
     Walk the graph from a starting room. Find connected rooms
     through shared wings.
@@ -158,7 +165,9 @@ def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
     return results[:50]  # cap results
 
 
-def find_tunnels(wing_a: str = None, wing_b: str = None, col=None, config=None):
+def find_tunnels(
+    wing_a: str = None, wing_b: str = None, col=None, config=None, *, model: str | None = None
+):
     """
     Find rooms that connect two wings (or all tunnel rooms if no wings specified).
     These are the "hallways" — same named idea appearing in multiple domains.
@@ -190,7 +199,7 @@ def find_tunnels(wing_a: str = None, wing_b: str = None, col=None, config=None):
     return tunnels[:50]
 
 
-def graph_stats(col=None, config=None):
+def graph_stats(col=None, config=None, *, model: str | None = None):
     """Summary statistics about the palace graph."""
     nodes, edges = build_graph(col, config)
 

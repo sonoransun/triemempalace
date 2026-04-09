@@ -13,7 +13,6 @@ from mempalace.normalize import (
     normalize,
 )
 
-
 # ── normalize() top-level ──────────────────────────────────────────────
 
 
@@ -41,11 +40,10 @@ def test_empty(tmp_path):
 
 def test_normalize_io_error():
     """normalize raises IOError for unreadable file."""
-    try:
+    import pytest
+
+    with pytest.raises(OSError, match="Could not read"):
         normalize("/nonexistent/path/file.txt")
-        assert False, "Should have raised"
-    except IOError as e:
-        assert "Could not read" in str(e)
 
 
 def test_normalize_already_has_markers(tmp_path):

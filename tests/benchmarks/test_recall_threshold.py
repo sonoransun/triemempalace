@@ -16,7 +16,6 @@ import pytest
 from tests.benchmarks.data_generator import PalaceDataGenerator
 from tests.benchmarks.report import record_metric
 
-
 NEEDLE_TOPICS = [
     "Fibonacci sequence optimization uses memoization with O(n) space complexity",
     "PostgreSQL vacuum autovacuum threshold set to 50 percent for table users",

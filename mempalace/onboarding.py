@@ -16,10 +16,13 @@ Usage:
     or: mempalace init
 """
 
+import logging
 from pathlib import Path
-from mempalace.entity_registry import EntityRegistry
-from mempalace.entity_detector import detect_entities, scan_for_detection
 
+from mempalace.entity_detector import detect_entities, scan_for_detection
+from mempalace.entity_registry import EntityRegistry
+
+logger = logging.getLogger("mempalace.onboarding")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Default wing taxonomies by mode
@@ -235,7 +238,12 @@ def _auto_detect(directory: str, known_people: list) -> list:
             if e["name"].lower() not in known_names and e["confidence"] >= 0.7
         ]
         return new_people
-    except Exception:
+    except Exception as e:
+        # Defensive: the auto-detect preview is optional polish on the
+        # first-run wizard. Any failure (missing scan deps, corrupt
+        # files, network timeouts on entity lookups) just skips the
+        # preview rather than crashing the onboarding flow.
+        logger.debug("onboarding: entity preview failed — %s", e)
         return []
 
 

@@ -10,6 +10,7 @@ mempalace imports — so that module-level initialisations (e.g.
 instead of the real user profile.
 """
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -32,18 +33,50 @@ import pytest  # noqa: E402
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+from mempalace.trie_index import TrieIndex, trie_db_path  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
-    """Reset the MCP server's cached ChromaDB client/collection between tests."""
+    """Reset every module-level cache between tests.
+
+    Covers: mcp_server client/collection/trie caches, palace_io client
+    cache, embeddings loaded_functions cache, and TrieIndex._instances
+    singleton registry. The last one was missed in earlier rounds and
+    can cause cross-test state leakage when test paths collide.
+    """
 
     def _clear_cache():
         try:
             from mempalace import mcp_server
 
             mcp_server._client_cache = None
-            mcp_server._collection_cache = None
+            # _collection_cache is now a per-model dict (not a single value)
+            mcp_server._collection_cache = {}
+            mcp_server._trie_cache = None
+        except (ImportError, AttributeError):
+            pass
+        try:
+            from mempalace import palace_io
+
+            palace_io.close_all()
+        except (ImportError, AttributeError):
+            pass
+        try:
+            from mempalace import embeddings
+
+            embeddings.clear_cache()
+        except (ImportError, AttributeError):
+            pass
+        try:
+            from mempalace.trie_index import TrieIndex
+
+            # Close every live instance before clearing the registry;
+            # otherwise LMDB envs leak file handles until gc collects them.
+            for instance in list(TrieIndex._instances.values()):
+                with contextlib.suppress(Exception):
+                    instance.close()
+            TrieIndex._instances.clear()
         except (ImportError, AttributeError):
             pass
 
@@ -70,11 +103,14 @@ def _isolate_home():
 
 
 @pytest.fixture
-def tmp_dir():
-    """Create and auto-cleanup a temporary directory."""
-    d = tempfile.mkdtemp(prefix="mempalace_test_")
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
+def tmp_dir(tmp_path):
+    """Create and auto-cleanup a temporary directory.
+
+    Backed by pytest's ``tmp_path`` so cleanup is handled by the framework;
+    yields a string for backwards compatibility with older call sites that
+    use ``os.path.join(tmp_dir, ...)``.
+    """
+    return str(tmp_path)
 
 
 @pytest.fixture
@@ -187,3 +223,27 @@ def seeded_kg(kg):
     kg.add_triple("Alice", "works_at", "NewCo", valid_from="2025-01-01")
 
     return kg
+
+
+@pytest.fixture
+def trie(tmp_dir):
+    """An isolated TrieIndex using a temp LMDB env directory."""
+    db_path = os.path.join(tmp_dir, "test_trie.lmdb")
+    t = TrieIndex(db_path=db_path)
+    yield t
+    t.close()
+
+
+@pytest.fixture
+def seeded_trie(palace_path, seeded_collection):
+    """TrieIndex rooted at ``<palace_path>/trie_index.lmdb``, populated
+    from the seeded ChromaDB collection.
+
+    Colocating the trie next to the palace lets ``searcher.hybrid_search``
+    find it automatically — the production code resolves the DB path the
+    same way.
+    """
+    t = TrieIndex(db_path=trie_db_path(palace_path))
+    t.rebuild_from_collection(seeded_collection)
+    yield t
+    t.close()

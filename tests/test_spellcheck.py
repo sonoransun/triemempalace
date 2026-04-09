@@ -11,7 +11,6 @@ from mempalace.spellcheck import (
     spellcheck_user_text,
 )
 
-
 # --- _should_skip ---
 
 

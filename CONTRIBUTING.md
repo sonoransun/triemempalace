@@ -60,7 +60,7 @@ assets/             ← logo + brand
 - **Naming**: `snake_case` for functions/variables, `PascalCase` for classes
 - **Docstrings**: on all modules and public functions
 - **Type hints**: where they improve readability
-- **Dependencies**: minimize. ChromaDB + PyYAML only. Don't add new deps without discussion.
+- **Dependencies**: minimize. Runtime floor is ChromaDB, PyYAML, `lmdb`, and `pyroaring` — the latter two back the low-latency trie index (`mempalace/trie_index.py`). All four publish prebuilt wheels on macOS arm64/x86_64, Linux x86_64/aarch64, and Windows x86_64, so no compiler is required. Don't add new runtime deps without discussion.
 
 ## Good First Issues
 

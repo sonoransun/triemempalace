@@ -32,6 +32,30 @@ Mines conversation exports from Claude, ChatGPT, or Slack into the palace.
 
 Auto-classifies mined content into decisions, milestones, and problems.
 
+## 2b. Consider a specialized embedding model (optional)
+
+By default MemPalace uses the built-in ONNX all-MiniLM-L6-v2 model, which
+works well for general English prose. If the user is mining one of these
+specialized workloads, suggest (but don't force) a dedicated model:
+
+- **Source code repositories** → `--model jina-code-v2`
+  (trained on CodeSearchNet, 8192-token context)
+- **Long LLM conversations / decision logs / architecture docs** →
+  `--model nomic-text-v1.5` (8192-token context means no
+  mid-drawer truncation)
+- **MTEB-proven general retrieval, torch already installed** →
+  `--model mxbai-large` (1024-dim, MTEB top-5)
+
+Before mining with a specialized model, confirm the extras are
+installed and the slug is enabled:
+
+    mempalace models list                      # shows install/enable status
+    mempalace models enable <slug>             # if not yet enabled
+
+Each model writes to its own Chroma collection, so switching `--model`
+is non-destructive — the existing `default` collection stays put. See
+docs/MODEL_SELECTION.md for the full decision table.
+
 ## 3. Optionally split mega-files first
 
 If the source directory contains very large files, suggest splitting them

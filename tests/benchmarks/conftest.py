@@ -6,7 +6,6 @@ import tempfile
 
 import pytest
 
-
 SCALE_OPTIONS = ["small", "medium", "large", "stress"]
 
 

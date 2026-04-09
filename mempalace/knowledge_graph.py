@@ -37,13 +37,11 @@ Usage:
 
 import hashlib
 import json
-import os
 import sqlite3
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-
-DEFAULT_KG_PATH = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
+DEFAULT_KG_PATH = str(Path("~/.mempalace/knowledge_graph.sqlite3").expanduser())
 
 
 class KnowledgeGraph:
@@ -123,6 +121,24 @@ class KnowledgeGraph:
         """
         Add a relationship triple: subject → predicate → object.
 
+        Dedupe semantics: if a triple with identical ``(subject,
+        predicate, object)`` and ``valid_to IS NULL`` already exists,
+        the incoming evidence is **merged** into that row rather than
+        inserted as a duplicate:
+
+          - ``source_closet`` lists are union-merged (the column
+            stores a JSON-encoded list; legacy single-string values
+            are auto-wrapped on first merge).
+          - ``confidence`` is updated via a saturation curve
+            ``1 - (1 - c)^N`` so repeated evidence asymptotes toward
+            1.0 without ever reaching it — hand-tuned to match how
+            a cautious reader would update their belief after
+            hearing the same claim N times.
+
+        This is what lets the automatic KG extraction tranche write
+        the same triple from many drawers without blowing up the
+        row count or losing provenance.
+
         Examples:
             add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")
             add_triple("Max", "does", "swimming", valid_from="2025-01-01")
@@ -137,17 +153,41 @@ class KnowledgeGraph:
         conn.execute("INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)", (sub_id, subject))
         conn.execute("INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)", (obj_id, obj))
 
-        # Check for existing identical triple
+        # Check for existing identical triple (currently-valid instance).
         existing = conn.execute(
-            "SELECT id FROM triples WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
+            "SELECT id, confidence, source_closet FROM triples "
+            "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
             (sub_id, pred, obj_id),
         ).fetchone()
 
         if existing:
+            existing_id, existing_conf, existing_sources = existing
+            # Merge source_closet lists: migrate legacy single-string
+            # values to JSON lists on the fly.
+            merged_sources = self._merge_source_closets(existing_sources, source_closet)
+            # Saturation-curve confidence update: 1 - (1 - c) * (1 - new_c)
+            # This is the "independent evidence" rule and asymptotes
+            # to 1.0 without reaching it. Clamp old ``1.0`` values
+            # (from legacy manual triples) to 0.99 so the curve
+            # remains monotonic.
+            old_clamped = min(max(float(existing_conf or 0.5), 0.0), 0.99)
+            new_clamped = min(max(float(confidence or 0.5), 0.0), 0.99)
+            new_conf = 1.0 - (1.0 - old_clamped) * (1.0 - new_clamped)
+            conn.execute(
+                "UPDATE triples SET confidence=?, source_closet=? WHERE id=?",
+                (new_conf, merged_sources, existing_id),
+            )
+            conn.commit()
             conn.close()
-            return existing[0]  # Already exists and still valid
+            return existing_id
 
-        triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.md5(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:8]}"
+        triple_hash_input = f"{valid_from}{datetime.now(UTC).isoformat()}".encode()
+        triple_hash = hashlib.md5(triple_hash_input, usedforsecurity=False).hexdigest()[:8]
+        triple_id = f"t_{sub_id}_{pred}_{obj_id}_{triple_hash}"
+
+        # Wrap single drawer_id in a JSON list so the column shape
+        # is consistent from the first insert.
+        stored_sources = json.dumps([source_closet]) if source_closet else None
 
         conn.execute(
             """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file)
@@ -160,13 +200,46 @@ class KnowledgeGraph:
                 valid_from,
                 valid_to,
                 confidence,
-                source_closet,
+                stored_sources,
                 source_file,
             ),
         )
         conn.commit()
         conn.close()
         return triple_id
+
+    @staticmethod
+    def _merge_source_closets(existing: str | None, new: str | None) -> str | None:
+        """Merge a new source_closet ID into the JSON list stored in
+        the column.
+
+        Handles three legacy formats on the existing side:
+          - ``None`` → start a fresh list with just ``new``
+          - A bare string (single drawer_id from a pre-this-tranche
+            insert) → wrap into a one-element list, then append
+          - A JSON-encoded list → parse, dedupe-append, re-encode
+
+        Returns ``None`` if both inputs are None so existing rows
+        don't grow a spurious empty-list marker.
+        """
+        if not existing and not new:
+            return None
+        items: list[str] = []
+        if existing:
+            try:
+                parsed = json.loads(existing)
+                items = (
+                    [str(x) for x in parsed]
+                    if isinstance(parsed, list)
+                    # Legacy: stored a bare string, not JSON
+                    else [str(existing)]
+                )
+            except (json.JSONDecodeError, TypeError):
+                # Legacy: stored a bare string without JSON encoding
+                items = [existing]
+        if new and new not in items:
+            items.append(new)
+        return json.dumps(items)
 
     def invalidate(self, subject: str, predicate: str, obj: str, ended: str = None):
         """Mark a relationship as no longer valid (set valid_to date)."""

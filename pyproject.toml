@@ -3,7 +3,7 @@ name = "mempalace"
 version = "3.0.14"
 description = "Give your AI a memory — mine projects and conversations into a searchable palace. No API key required."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [
     {name = "milla-jovovich"},
@@ -17,16 +17,17 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Utilities",
 ]
 dependencies = [
     "chromadb>=0.5.0,<0.7",
     "pyyaml>=6.0",
+    "lmdb>=1.4",
+    "pyroaring>=0.4",
 ]
 
 [project.urls]
@@ -40,6 +41,44 @@ mempalace = "mempalace:main"
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
 spellcheck = ["autocorrect>=2.0"]
+# Embedding-model backends. Each is opt-in: the core install uses
+# Chroma's built-in ONNX all-MiniLM-L6-v2 and never touches these.
+# fastembed is a pure-ONNX library (no torch). sentence-transformers
+# drags torch. ollama is a tiny HTTP client for a locally-running
+# Ollama server — model weights live on the Ollama side.
+embeddings-fastembed = ["fastembed>=0.3"]
+embeddings-sentence-transformers = ["sentence-transformers>=2.7"]
+embeddings-ollama = ["ollama>=0.3"]
+embeddings-all = [
+    "fastembed>=0.3",
+    "sentence-transformers>=2.7",
+    "ollama>=0.3",
+]
+# Reranker backends. Each is opt-in: the core install has no reranker.
+# ``rerank-provence`` pulls transformers + torch for the unified
+# rerank+prune path (Chirkova ICLR 2025). ``rerank-bge`` uses fastembed's
+# TextCrossEncoder path for a pure cross-encoder reranker without
+# torch. Users can mix: installing ``rerank-bge`` alone skips torch
+# entirely while still giving cross-encoder quality.
+rerank-provence = ["transformers>=4.40", "torch>=2.2"]
+rerank-bge = ["fastembed>=0.3"]
+rerank-all = [
+    "transformers>=4.40",
+    "torch>=2.2",
+    "fastembed>=0.3",
+]
+# Learned compression modes. ``compress-llmlingua`` pulls Microsoft's
+# LLMLingua-2 (Pan et al., ACL 2024) — a small bidirectional
+# transformer (xlm-roberta-large) that labels each token keep/drop
+# using GPT-4-distilled targets. 2-5× tighter compression than the
+# heuristic ``aggressive`` mode at the same preserved-info level.
+compress-llmlingua = ["llmlingua>=0.2"]
+# Automatic knowledge-graph extraction via a local Ollama server.
+# Pairs with the existing ``embeddings-ollama`` dep — users who
+# already have Ollama for inference pay no additional cost.
+# Heuristic extraction (``--kg-extract-mode heuristic``) ships in
+# the core install with zero new deps.
+kg-extract-ollama = ["ollama>=0.3"]
 
 [dependency-groups]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
@@ -53,11 +92,27 @@ packages = ["mempalace"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+select = ["E", "F", "W", "UP", "B", "SIM", "I", "N", "PT"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests stack multiple `patch(...)` context managers for legibility; the
+# SIM117 combined form produces less-readable 4-context with-blocks that
+# exceed the line limit, so the nested form is the right call here.
+"tests/test_spellcheck.py" = ["SIM117"]
+"tests/test_spellcheck_extra.py" = ["SIM117", "N806"]
+"tests/test_searcher.py" = ["SIM117", "N805"]
+"tests/test_hooks_cli.py" = ["SIM117", "PT017"]
+# Benchmark data generator and report builder use short loop vars (`i`)
+# and nested conditionals that match their statistical intent; rewriting
+# just to satisfy SIM/B hurts readability.
+"tests/benchmarks/*" = ["B007", "SIM102"]
+# Onboarding uses an if/elif ladder over three menu choices — a dict
+# lookup is shorter but the ladder matches the user-facing prompt flow.
+"mempalace/onboarding.py" = ["SIM116"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -70,6 +125,20 @@ markers = [
     "benchmark: scale/performance benchmark tests",
     "slow: tests that take more than 30 seconds",
     "stress: destructive scale tests (100K+ drawers)",
+]
+filterwarnings = [
+    # Promote every warning the package itself emits to an error so the
+    # test suite catches regressions (stale datetime usage, pydantic
+    # deprecations in our own code, etc.). Upstream warnings we don't own
+    # are listed below.
+    "error",
+    # chromadb 0.6 still touches `self.model_fields` on Pydantic 2.11, which
+    # upstream has deprecated for 3.0. We don't own that code path — silence
+    # the warning until chromadb ships a compatible release.
+    "ignore::pydantic.PydanticDeprecatedSince211",
+    # chromadb's ONNX model downloader uses tar.extractall without a filter.
+    # Same story — upstream will fix before Python 3.14 removes the default.
+    "ignore::DeprecationWarning:chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2",
 ]
 
 [tool.coverage.run]

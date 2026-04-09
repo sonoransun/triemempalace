@@ -7,15 +7,22 @@ Routes each file to the right room based on content.
 Stores verbatim chunks as drawers. No summaries. Ever.
 """
 
+import fnmatch
+import hashlib
+import logging
 import os
 import sys
-import hashlib
-import fnmatch
-from pathlib import Path
-from datetime import datetime
 from collections import defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
 
 import chromadb
+import chromadb.errors
+
+from .palace_io import open_collection
+from .trie_index import TrieIndex, trie_db_path
+
+logger = logging.getLogger("mempalace.miner")
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -78,6 +85,10 @@ SKIP_FILENAMES = {
 CHUNK_SIZE = 800  # chars per drawer
 CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
+# How many leading chars of a file to scan when guessing its room. Small
+# enough that large files don't pay a full-file scan cost, large enough
+# to catch a section header or keyword-rich opening paragraph.
+ROOM_DETECTION_WINDOW = 2000
 
 
 # =============================================================================
@@ -100,7 +111,8 @@ class GitignoreMatcher:
 
         try:
             lines = gitignore_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
+        except OSError as e:
+            logger.debug("GitignoreRules.from_dir: read failed for %s — %s", gitignore_path, e)
             return None
 
         rules = []
@@ -309,7 +321,7 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
     """
     relative = str(filepath.relative_to(project_path)).lower()
     filename = filepath.stem.lower()
-    content_lower = content[:2000].lower()
+    content_lower = content[:ROOM_DETECTION_WINDOW].lower()
 
     # Priority 1: folder path matches room name or keywords
     path_parts = relative.replace("\\", "/").split("/")
@@ -393,15 +405,6 @@ def chunk_text(content: str, source_file: str) -> list:
 # =============================================================================
 
 
-def get_collection(palace_path: str):
-    os.makedirs(palace_path, exist_ok=True)
-    client = chromadb.PersistentClient(path=palace_path)
-    try:
-        return client.get_collection("mempalace_drawers")
-    except Exception:
-        return client.create_collection("mempalace_drawers")
-
-
 def file_already_mined(collection, source_file: str) -> bool:
     """Fast check: has this file been filed before and is unchanged?
 
@@ -417,39 +420,55 @@ def file_already_mined(collection, source_file: str) -> bool:
         stored_mtime = stored_meta.get("source_mtime")
         if stored_mtime is None:
             return False
-        current_mtime = os.path.getmtime(source_file)
+        current_mtime = Path(source_file).stat().st_mtime
         return float(stored_mtime) == current_mtime
-    except Exception:
+    except (OSError, chromadb.errors.ChromaError, ValueError) as e:
+        # OSError: source file missing. ChromaError: collection query
+        # failed. ValueError: malformed metadata. In all cases the
+        # answer is "re-mine it".
+        logger.debug("file_already_mined(%s): %s — re-mining", source_file, e)
         return False
 
 
 def add_drawer(
-    collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+    collection,
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str,
+    chunk_index: int,
+    agent: str,
+    *,
+    trie_buffer: list | None = None,
 ):
-    """Add one drawer to the palace."""
+    """Add one drawer to the palace.
+
+    If ``trie_buffer`` is provided, the caller will flush postings to the
+    :class:`TrieIndex` in a single batch after the file is fully mined —
+    this amortizes the SQLite commit across all chunks of a file.
+    """
     drawer_id = f"drawer_{wing}_{room}_{hashlib.md5((source_file + str(chunk_index)).encode(), usedforsecurity=False).hexdigest()[:16]}"
+    metadata = {
+        "wing": wing,
+        "room": room,
+        "source_file": source_file,
+        "chunk_index": chunk_index,
+        "added_by": agent,
+        "filed_at": datetime.now(UTC).isoformat(),
+    }
+    # Store file mtime so we can detect modifications later.
     try:
-        metadata = {
-            "wing": wing,
-            "room": room,
-            "source_file": source_file,
-            "chunk_index": chunk_index,
-            "added_by": agent,
-            "filed_at": datetime.now().isoformat(),
-        }
-        # Store file mtime so we can detect modifications later.
-        try:
-            metadata["source_mtime"] = os.path.getmtime(source_file)
-        except OSError:
-            pass
-        collection.upsert(
-            documents=[content],
-            ids=[drawer_id],
-            metadatas=[metadata],
-        )
-        return True
-    except Exception:
-        raise
+        metadata["source_mtime"] = Path(source_file).stat().st_mtime
+    except OSError as e:
+        logger.debug("add_drawer: mtime stat failed for %s — %s", source_file, e)
+    collection.upsert(
+        documents=[content],
+        ids=[drawer_id],
+        metadatas=[metadata],
+    )
+    if trie_buffer is not None:
+        trie_buffer.append((drawer_id, content, metadata))
+    return True
 
 
 # =============================================================================
@@ -465,6 +484,7 @@ def process_file(
     rooms: list,
     agent: str,
     dry_run: bool,
+    trie: TrieIndex | None = None,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
 
@@ -490,6 +510,7 @@ def process_file(
         return len(chunks), room
 
     drawers_added = 0
+    trie_buffer: list = [] if trie is not None else None
     for chunk in chunks:
         added = add_drawer(
             collection=collection,
@@ -499,9 +520,14 @@ def process_file(
             source_file=source_file,
             chunk_index=chunk["chunk_index"],
             agent=agent,
+            trie_buffer=trie_buffer,
         )
         if added:
             drawers_added += 1
+
+    # Flush all of this file's chunks to the trie in one transaction.
+    if trie is not None and trie_buffer:
+        trie.add_batch(trie_buffer)
 
     return drawers_added, room
 
@@ -559,9 +585,13 @@ def scan_project(
                 continue
             if filepath.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
                 continue
-            if respect_gitignore and active_matchers and not force_include:
-                if is_gitignored(filepath, active_matchers, is_dir=False):
-                    continue
+            if (
+                respect_gitignore
+                and active_matchers
+                and not force_include
+                and is_gitignored(filepath, active_matchers, is_dir=False)
+            ):
+                continue
             files.append(filepath)
     return files
 
@@ -580,8 +610,14 @@ def mine(
     dry_run: bool = False,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    model: str | None = None,
 ):
-    """Mine a project directory into the palace."""
+    """Mine a project directory into the palace.
+
+    ``model`` selects which embedding model's collection to write to.
+    ``None`` (the default) uses the palace's configured default model,
+    which for legacy palaces is Chroma's built-in ONNX mini-lm.
+    """
 
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)
@@ -613,9 +649,11 @@ def mine(
     print(f"{'─' * 55}\n")
 
     if not dry_run:
-        collection = get_collection(palace_path)
+        collection = open_collection(palace_path, model=model, create=True)
+        trie = TrieIndex(db_path=trie_db_path(palace_path))
     else:
         collection = None
+        trie = None
 
     total_drawers = 0
     files_skipped = 0
@@ -630,6 +668,7 @@ def mine(
             rooms=rooms,
             agent=agent,
             dry_run=dry_run,
+            trie=trie,
         )
         if drawers == 0 and not dry_run:
             files_skipped += 1
@@ -656,12 +695,12 @@ def mine(
 # =============================================================================
 
 
-def status(palace_path: str):
-    """Show what's been filed in the palace."""
+def status(palace_path: str, *, model: str | None = None):
+    """Show what's been filed in the palace for a given model's collection."""
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception:
+        col = open_collection(palace_path, model=model)
+    except (OSError, chromadb.errors.ChromaError) as e:
+        logger.debug("status: collection open failed — %s", e)
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return

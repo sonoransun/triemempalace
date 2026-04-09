@@ -22,14 +22,13 @@ Usage:
 
 import re
 from pathlib import Path
-from typing import Optional
 
 # Lazy-load autocorrect — not everyone has it installed
 _speller = None
 _autocorrect_available = None
 
 # System word list — loaded once, used to skip already-valid words
-_system_words: Optional[set] = None
+_system_words: set | None = None
 _SYSTEM_DICT = Path("/usr/share/dict/words")
 
 
@@ -102,9 +101,7 @@ def _should_skip(token: str, known_names: set) -> bool:
     if _IS_CODE_OR_EMOJI.search(token):
         return True
     # Known proper names (entity registry)
-    if token.lower() in known_names:
-        return True
-    return False
+    return token.lower() in known_names
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +122,10 @@ def _load_known_names() -> set:
                 names.add(alias.lower())
         return names
     except Exception:
+        # Defensive: the registry load path touches several layers
+        # (file I/O, JSON parsing, optional network lookups for Wikipedia
+        # disambiguation). Any failure falls back to "no name protection"
+        # — never a fatal error for the spellchecker.
         return set()
 
 
@@ -158,7 +159,7 @@ def _edit_distance(a: str, b: str) -> int:
 _TOKEN_RE = re.compile(r"(\S+)")
 
 
-def spellcheck_user_text(text: str, known_names: Optional[set] = None) -> str:
+def spellcheck_user_text(text: str, known_names: set | None = None) -> str:
     """
     Spell-correct a user message.
 

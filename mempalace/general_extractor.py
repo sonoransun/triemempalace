@@ -20,8 +20,6 @@ Usage:
 """
 
 import re
-from typing import List, Dict, Tuple
-
 
 # =============================================================================
 # MARKER SETS — One per memory type
@@ -266,7 +264,7 @@ def _has_resolution(text: str) -> bool:
     return any(re.search(p, text_lower) for p in patterns)
 
 
-def _disambiguate(memory_type: str, text: str, scores: Dict[str, float]) -> str:
+def _disambiguate(memory_type: str, text: str, scores: dict[str, float]) -> str:
     """Fix misclassifications using sentiment + resolution."""
     sentiment = _get_sentiment(text)
 
@@ -315,9 +313,7 @@ def _is_code_line(line: str) -> bool:
         if pattern.match(stripped):
             return True
     alpha_ratio = sum(1 for c in stripped if c.isalpha()) / max(len(stripped), 1)
-    if alpha_ratio < 0.4 and len(stripped) > 10:
-        return True
-    return False
+    return bool(alpha_ratio < 0.4 and len(stripped) > 10)
 
 
 def _extract_prose(text: str) -> str:
@@ -342,7 +338,7 @@ def _extract_prose(text: str) -> str:
 # =============================================================================
 
 
-def _score_markers(text: str, markers: List[str]) -> Tuple[float, List[str]]:
+def _score_markers(text: str, markers: list[str]) -> tuple[float, list[str]]:
     """Score text against regex markers. Returns (score, matched_keywords)."""
     text_lower = text.lower()
     score = 0.0
@@ -360,7 +356,7 @@ def _score_markers(text: str, markers: List[str]) -> Tuple[float, List[str]]:
 # =============================================================================
 
 
-def extract_memories(text: str, min_confidence: float = 0.3) -> List[Dict]:
+def extract_memories(text: str, min_confidence: float = 0.3) -> list[dict]:
     """
     Extract memories from a text string.
 
@@ -421,7 +417,7 @@ def extract_memories(text: str, min_confidence: float = 0.3) -> List[Dict]:
     return memories
 
 
-def _split_into_segments(text: str) -> List[str]:
+def _split_into_segments(text: str) -> list[str]:
     """
     Split text into segments suitable for memory extraction.
 
@@ -464,7 +460,7 @@ def _split_into_segments(text: str) -> List[str]:
     return paragraphs
 
 
-def _split_by_turns(lines: List[str], turn_patterns: List[re.Pattern]) -> List[str]:
+def _split_by_turns(lines: list[str], turn_patterns: list[re.Pattern]) -> list[str]:
     """Split lines into segments at each speaker turn boundary."""
     segments = []
     current = []
@@ -500,7 +496,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     filepath = sys.argv[1]
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+    with open(filepath, encoding="utf-8", errors="replace") as f:
         text = f.read()
 
     memories = extract_memories(text)

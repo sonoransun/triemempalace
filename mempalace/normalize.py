@@ -15,9 +15,7 @@ No API key. No internet. Everything local.
 """
 
 import json
-import os
 from pathlib import Path
-from typing import Optional
 
 
 def normalize(filepath: str) -> str:
@@ -26,10 +24,10 @@ def normalize(filepath: str) -> str:
     Plain text files pass through unchanged.
     """
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError as e:
-        raise IOError(f"Could not read {filepath}: {e}")
+        raise OSError(f"Could not read {filepath}: {e}") from e
 
     if not content.strip():
         return content
@@ -49,7 +47,7 @@ def normalize(filepath: str) -> str:
     return content
 
 
-def _try_normalize_json(content: str) -> Optional[str]:
+def _try_normalize_json(content: str) -> str | None:
     """Try all known JSON chat schemas."""
 
     normalized = _try_claude_code_jsonl(content)
@@ -73,7 +71,7 @@ def _try_normalize_json(content: str) -> Optional[str]:
     return None
 
 
-def _try_claude_code_jsonl(content: str) -> Optional[str]:
+def _try_claude_code_jsonl(content: str) -> str | None:
     """Claude Code JSONL sessions."""
     lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
     messages = []
@@ -99,7 +97,7 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
     return None
 
 
-def _try_codex_jsonl(content: str) -> Optional[str]:
+def _try_codex_jsonl(content: str) -> str | None:
     """OpenAI Codex CLI sessions (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl).
 
     Uses only event_msg entries (user_message / agent_message) which represent
@@ -147,7 +145,7 @@ def _try_codex_jsonl(content: str) -> Optional[str]:
     return None
 
 
-def _try_claude_ai_json(data) -> Optional[str]:
+def _try_claude_ai_json(data) -> str | None:
     """Claude.ai JSON export: flat messages list or privacy export with chat_messages."""
     if isinstance(data, dict):
         data = data.get("messages", data.get("chat_messages", []))
@@ -190,7 +188,7 @@ def _try_claude_ai_json(data) -> Optional[str]:
     return None
 
 
-def _try_chatgpt_json(data) -> Optional[str]:
+def _try_chatgpt_json(data) -> str | None:
     """ChatGPT conversations.json with mapping tree."""
     if not isinstance(data, dict) or "mapping" not in data:
         return None
@@ -231,7 +229,7 @@ def _try_chatgpt_json(data) -> Optional[str]:
     return None
 
 
-def _try_slack_json(data) -> Optional[str]:
+def _try_slack_json(data) -> str | None:
     """
     Slack channel export: [{"type": "message", "user": "...", "text": "..."}]
     Optimized for 2-person DMs. In channels with 3+ people, alternating
@@ -322,7 +320,7 @@ if __name__ == "__main__":
     filepath = sys.argv[1]
     result = normalize(filepath)
     quote_count = sum(1 for line in result.split("\n") if line.strip().startswith(">"))
-    print(f"\nFile: {os.path.basename(filepath)}")
+    print(f"\nFile: {Path(filepath).name}")
     print(f"Normalized: {len(result)} chars | {quote_count} user turns detected")
     print("\n--- Preview (first 20 lines) ---")
     print("\n".join(result.split("\n")[:20]))

@@ -2,9 +2,17 @@
 
 <img src="assets/mempalace_logo.png" alt="MemPalace" width="280">
 
-# MemPalace
+# Trie MemPalace Today! Act now for your Free Trial Forever :)
 
 ### The highest-scoring AI memory system ever benchmarked. And it's free.
+
+<br>
+
+<b>This exploratory fork utilizes trie datastructures for faster search with combined temporal constraints. Not for production use! Reduced latency is prioritized over resiliency.</b>
+
+<br>
+
+Seven embedding models supported for evaluation, including code-specialized and long-context models. Pick one with `--model <slug>` or fan out across every enabled model with `--model all` (Reciprocal Rank Fusion). See the [Model Selection Guide](docs/MODEL_SELECTION.md) for the full decision table.
 
 <br>
 
@@ -87,7 +95,7 @@ Other memory systems try to fix this by letting AI decide what's worth rememberi
 ## Quick Start
 
 ```bash
-pip install mempalace
+pip install triemempalace
 
 # Set up your world — who you work with, what your projects are
 mempalace init ~/projects/myapp
@@ -117,8 +125,8 @@ After the one-time setup (install → init → mine), you don't run MemPalace co
 Native marketplace install:
 
 ```bash
-claude plugin marketplace add milla-jovovich/mempalace
-claude plugin install --scope user mempalace
+claude plugin marketplace add sonoransun/triemempalace
+claude plugin install --scope user triemempalace
 ```
 
 Restart Claude Code, then type `/skills` to verify "mempalace" appears.
@@ -188,6 +196,46 @@ MemPalace loads 170 tokens of critical facts on wake-up — your team, your proj
 ---
 
 ## How It Works
+
+### System at a glance
+
+Under the hood, every palace is **three coordinated stores** living
+side-by-side. Writes go to all three; reads compose signals from
+each one. ([Full architecture reference →](docs/ARCHITECTURE.md))
+
+```mermaid
+graph TB
+    Q(["🔍 query"])
+    Q --> HS{"searcher.hybrid_search"}
+    HS -->|"1. keyword +<br/>temporal prefilter"| Trie["⚡ LMDB Trie<br/>────<br/>keyword + temporal<br/>14 sub-DBs<br/>Roaring bitmaps"]
+    HS -.->|"1b. optional<br/>entity PPR"| KG["🧠 SQLite KG<br/>────<br/>entities + triples<br/>HippoRAG-style<br/>PageRank"]
+    HS -->|"2. vector query<br/>over candidate set"| Chroma["🔷 ChromaDB<br/>────<br/>verbatim text<br/>+ embeddings<br/>one collection<br/>per model"]
+    Chroma --> Rerank["3. cross-encoder<br/>rerank (optional)"]
+    Rerank --> Comp["4. compression<br/>(none / dedupe / .. /<br/>llmlingua2)"]
+    Comp --> Out(["📤 verbatim drawers<br/>+ metadata + scores"])
+
+    classDef store fill:#e1f5ff,stroke:#0066cc
+    classDef optional fill:#fff8dc,stroke:#d4a017,stroke-dasharray: 5 5
+    class Chroma,Trie,KG store
+    class KG,Rerank optional
+```
+
+**What each backend owns:**
+
+- **ChromaDB** — the verbatim text + dense vectors. This is where
+  the 96.6% LongMemEval number comes from.
+- **LMDB trie** — the keyword and temporal index. Set-based, not
+  scored: "does this drawer contain 'auth'?" in ~48 μs warm,
+  "drawers from last Tuesday" in ~6 μs.
+- **SQLite KG** — entities + triples with `valid_from`/`valid_to`
+  temporal windows. Populated automatically during mining (opt-in)
+  and queried for multi-hop relationship traversal.
+
+Every arrow labeled _optional_ is a knob you can turn on
+individually: `--kg-ppr` for HippoRAG fusion, `--rerank provence`
+for cross-encoder rerank + pruning, `--compress aggressive` for
+result-set compression. Off by default, zero cost to the baseline
+path.
 
 ### The Palace
 
@@ -273,6 +321,28 @@ Search wing + room:          94.8%  (+34%)
 Wings and rooms aren't cosmetic. They're a **34% retrieval improvement**. The palace structure is the product.
 
 ### The Memory Stack
+
+```mermaid
+flowchart TB
+    subgraph Always["🟢 Always loaded — ~170 tokens, cold start"]
+        direction LR
+        L0["<b>L0 — Identity</b><br/>~50 tokens<br/>────<br/>who is this AI?<br/>traits, role<br/>~/.mempalace/identity.txt"]
+        L1["<b>L1 — Essential Story</b><br/>~120 tokens (AAAK)<br/>────<br/>critical facts<br/>team, projects,<br/>preferences"]
+    end
+    subgraph OnDemand["🟡 On-demand — per-query cost"]
+        direction LR
+        L2["<b>L2 — Room recall</b><br/>200-500 tokens<br/>────<br/>recent sessions<br/>within a wing/room<br/>when topic mentioned"]
+        L3["<b>L3 — Deep search</b><br/>unlimited<br/>────<br/>full semantic search<br/>via hybrid_search<br/>when explicitly asked"]
+    end
+    Wake(["🌅 wake up"]) --> Always
+    Topic(["💬 topic mentioned"]) --> L2
+    Ask(["❓ explicit question"]) --> L3
+
+    classDef always fill:#e6ffe6,stroke:#2e8b57
+    classDef demand fill:#fff8dc,stroke:#d4a017
+    class L0,L1 always
+    class L2,L3 demand
+```
 
 | Layer | What | Size | When |
 |-------|------|------|------|
@@ -583,11 +653,50 @@ mempalace wake-up --wing driftwood                # project-specific
 # Compression
 mempalace compress --wing myapp                   # AAAK compress
 
+# Embedding models
+mempalace models list                             # list all 7 models with status
+mempalace models download <slug>                  # eagerly fetch weights
+mempalace models enable <slug>                    # enable a model
+mempalace models disable <slug>                   # disable a model
+mempalace models set-default <slug>               # set palace default
+mempalace mine <dir> --model <slug>               # mine with a specific model
+mempalace search "query" --model <slug>           # search one model
+mempalace search "query" --model all              # RRF fan-out across enabled
+
 # Status
 mempalace status                                  # palace overview
 ```
 
 All commands accept `--palace <path>` to override the default location.
+
+---
+
+## Choosing an Embedding Model
+
+MemPalace ships with **seven embedding models** that coexist side-by-side in one palace. The default (`all-MiniLM-L6-v2` built into ChromaDB) works for everything and requires zero extra install, but a specialized model can meaningfully improve retrieval for source code, long LLM conversations, or MTEB-style general retrieval.
+
+| Workload | Use | Why |
+|---|---|---|
+| **Source code repos** (Python / JS / Go / Rust / etc.) | `jina-code-v2` | Trained on CodeSearchNet, 8192-token context |
+| **Long LLM conversations** / decision logs / architecture docs | `nomic-text-v1.5` | 8k context means no mid-drawer truncation |
+| **Strongest possible retrieval** across every enabled model | `--model all` | RRF fan-out auto-merges + deduplicates results |
+
+Three-step install-and-use (for the code-specialized model):
+
+```bash
+pip install 'mempalace[embeddings-fastembed]'
+mempalace models enable jina-code-v2
+mempalace mine ~/projects/mycode --model jina-code-v2
+```
+
+Search a single model or fan out across all enabled models:
+
+```bash
+mempalace search "where is auth verified" --model jina-code-v2
+mempalace search "where is auth verified" --model all
+```
+
+Each enabled model lives in its own ChromaDB collection, so switching models never overwrites existing drawers. See the **[Model Selection Guide](docs/MODEL_SELECTION.md)** for the full decision table, install-per-backend instructions, `mempalace models` CLI reference, RRF fan-out details, and troubleshooting.
 
 ---
 
@@ -599,9 +708,15 @@ All commands accept `--palace <path>` to override the default location.
 {
   "palace_path": "/custom/path/to/palace",
   "collection_name": "mempalace_drawers",
+  "default_embedding_model": "default",
+  "enabled_embedding_models": ["default", "jina-code-v2"],
+  "hnsw_ef_search": 40,
+  "fan_out_max_workers": 8,
   "people_map": {"Kai": "KAI", "Priya": "PRI"}
 }
 ```
+
+The `default_embedding_model` slug is used when `--model` is omitted on `mempalace mine` or `mempalace search`. The `enabled_embedding_models` list controls which collections `--model all` fan-out iterates over. Both default to `"default"` on first install; `mempalace models enable/disable/set-default` writes them atomically. `hnsw_ef_search` tunes HNSW search-time recall (default 40 — ~98% recall at sub-10 ms; bump to 80/128 for higher-stakes workloads). `fan_out_max_workers` caps the concurrency of `--model all` RRF fan-out (default 8). See [docs/MODEL_SELECTION.md](docs/MODEL_SELECTION.md) for the full model workflow, Matryoshka truncation, HNSW tuning, and parallel fan-out behavior.
 
 ### Wing config (`~/.mempalace/wing_config.json`)
 

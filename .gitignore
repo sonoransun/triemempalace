@@ -1,8 +1,526 @@
-*.egg-info/
-dist/
-build/
+# ─────────────────────────────────────────────────────────────────────
+#   MemPalace .gitignore
+# ─────────────────────────────────────────────────────────────────────
+#
+# Goals:
+#   1. Never commit Python build / cache artifacts.
+#   2. Never commit virtual environments or downloaded dependencies.
+#   3. Never commit nested repos, vendored deps, or submodule leftovers.
+#   4. Never commit runtime palace data (LMDB, Chroma, SQLite).
+#   5. Never commit large benchmark datasets.
+#   6. Never commit secrets, credentials, or per-developer editor state.
+#
+# Patterns are grouped by concern so future contributors can reason
+# about what's excluded and why. Lines starting with `!` un-ignore a
+# previously-ignored path (use sparingly).
+#
+# Verify with:
+#   git check-ignore -v <path>
+#   git status --ignored
+# ─────────────────────────────────────────────────────────────────────
+
+
+# ── 1. Python byte-compiled / build artifacts ────────────────────────
+
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+
+# distutils / setuptools / hatchling build output
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg
+*.egg-info/
+*.egg-link
+MANIFEST
+pip-wheel-metadata/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# PEP 582 — local package dirs
+__pypackages__/
+
+# Cython / CFFI intermediate output
+*.c
+*.cpp
+!mempalace/**/*.c
+!mempalace/**/*.cpp
+cython_debug/
+
+
+# ── 2. Virtual environments + package managers ──────────────────────
+#
+# CRITICAL: never commit a .venv, no matter what tool created it.
+# uv.lock / poetry.lock / Pipfile.lock are committed — their
+# corresponding venv directories are not.
+
+.venv/
+.venv.*/
+venv/
+venv.*/
+env/
+env.*/
+ENV/
+.env/
+virtualenv/
+.virtualenv/
+
+# uv caches + download artifacts (the committed uv.lock is fine)
+.uv_cache/
+.uv/
+
+# Poetry caches
+.poetry/
+poetry-runtime/
+
+# pip install caches
+.pip_cache/
+pip-cache/
+
+# conda
+.conda/
+
+
+# ── 3. Test, coverage, lint, and type-checker caches ────────────────
+
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+nosetests.xml
+test-results/
+.pytest-summary.txt
+
+# Linters / formatters
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.pylint.d/
+.pyright/
+
+# Type-checker output
+pyrightconfig.user.json
+
+
+# ── 4. Jupyter / IPython ────────────────────────────────────────────
+
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+
+# ── 5. OS / filesystem cruft ────────────────────────────────────────
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+.DocumentRevisions-V100
+.TemporaryItems
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.cab
+*.msi
+*.msix
+*.stackdump
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+
+# ── 6. Editor / IDE local state ─────────────────────────────────────
+#
+# These are per-developer and should never be shared via git.
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.idea_modules/
+
+# VS Code — ignore local workspace state but allow a few shared
+# project-level files like recommended extensions. Note the trailing
+# `/*` (not `/`): git can only re-include files inside a directory
+# that is itself still tracked, so the wildcard ignores the contents
+# while the negations carve exceptions.
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.shared.json
+*.code-workspace
+.history/
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+*.swm
+Session.vim
+.netrwhist
+tags
+
+# Emacs
+*~
+\#*\#
+.\#*
+.emacs.desktop
+.emacs.desktop.lock
+auto-save-list/
+tramp
+
+# Zed
+.zed/
+
+# Helix
+.helix/
+
+
+# ── 7. AI coding tools (Claude Code, Cursor, Aider, etc.) ───────────
+
+# Claude Code — `settings.local.json` is per-developer; shared
+# settings (if ever added) can live in `.claude/settings.json`.
+.claude/settings.local.json
+.claude/projects/
+.claude/.credentials.json
+
+# Cursor
+.cursor/
+.cursorignore
+
+# Continue
+.continue/
+
+# Aider
+.aider*
+.aider.tags.cache.v*/
+.aider.chat.history.md
+.aider.input.history
+
+# Codeium
+.codeium/
+
+
+# ── 8. MemPalace runtime data ───────────────────────────────────────
+#
+# These directories/files are created by `mempalace init`, `mine`,
+# and the trie index at runtime. They belong under the user's
+# `~/.mempalace/` (or an override path), never inside the source tree.
+#
+# If a developer accidentally runs `mempalace init .` from the repo
+# root, these patterns catch the fallout.
+
+# Palace directories at the repo root only (not inside tests/)
+/palace/
+/palace.backup/
+/.mempalace/
+/.mempalace_test/
+
+# Chroma data (any chroma.sqlite3 or HNSW parquet files)
+chroma.sqlite3
+chroma.sqlite3-shm
+chroma.sqlite3-wal
+*.parquet
+*/chroma-collections.parquet
+*/chroma-embeddings.parquet
+
+# LMDB trie environments
+*.lmdb/
+data.mdb
+lock.mdb
+
+# SQLite knowledge graph (at the repo root only)
+/knowledge_graph.sqlite3
+/knowledge_graph.sqlite3-shm
+/knowledge_graph.sqlite3-wal
+
+# Per-developer identity / critical facts
+identity.txt
+critical_facts.md
+!docs/**/identity.txt
+
+# Mempalace YAML config generated per-project by `mempalace init`
 mempal.yaml
-.a5c/
+
+# Wake-up snapshots + exports
+wake-up.txt
+wake-up-*.txt
+*.wake-up.txt
+
+
+# ── 9. Benchmark datasets ───────────────────────────────────────────
+#
+# The benchmark runners in `benchmarks/` load datasets that are too
+# large to ship in git. Download scripts live in `benchmarks/README.md`.
+
+benchmarks/data/
+benchmarks/datasets/
+benchmarks/downloads/
+benchmarks/results/
+benchmarks/output/
+benchmarks/runs/
+
+# Common dataset filenames (ignore wherever they land)
+longmemeval_*.json
+locomo*.json
+locomo10*.json
+convomem*.json
+membench*.json
+*_cleaned.json
+
+# Benchmark result CSVs / summaries (leave .md files tracked)
+benchmark-*.csv
+benchmark-*.jsonl
+bench_results_*/
+
+
+# ── 10. Model weights and inference caches ─────────────────────────
+#
+# fastembed, sentence-transformers, transformers, llmlingua, and
+# Ollama all download weights on first use. They default to
+# ~/.cache/... paths, but any developer running the tools from the
+# repo root with XDG overrides could land the weights here.
+
+# Raw weight formats
+*.onnx
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.h5
+*.tflite
+*.pkl.gz
+
+# Local model cache directories
+/models/
+/weights/
+/checkpoints/
+.cache/
+.fastembed_cache/
+.huggingface/
+.transformers_cache/
+.sentence_transformers_cache/
+.llmlingua_cache/
+
+# Ollama (should live in ~/.ollama/, but belt and suspenders)
+.ollama/
+
+
+# ── 11. Secrets, credentials, env files ────────────────────────────
+
+.env
+.env.*
+!.env.example
+!.env.sample
+.envrc
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+secrets.json
+credentials.json
+.credentials
+client_secret*.json
+
+# API key files
+.openai_api_key
+.anthropic_api_key
+.hf_token
+.huggingface_token
+
+
+# ── 12. Logs and temporary files ───────────────────────────────────
+
+*.log
+*.log.*
+logs/
+log/
+mempalace.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Core dumps
+core
+core.*
+*.stackdump
+
+# Temp dirs
+tmp/
+temp/
+.tmp/
+.temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+*.rej
+
+
+# ── 13. Subrepos, submodules, vendored dependencies ────────────────
+#
+# Catch nested repos or third-party code dropped into the tree
+# without proper submodule setup. Maximum-effectiveness guard
+# against accidentally committing a `git clone`d dir.
+
+# Nested git dirs — git won't descend into these anyway, but the
+# pattern flags them during `git status --ignored` so they're visible.
+**/.git/
+**/.git.bak/
+**/.gitignore.bak
+
+# Common vendor / third-party dirs (root-anchored so `mempalace/lib/`
+# or `tests/fixtures/lib/` — if they ever existed — would NOT match).
+/vendor/
+/vendored/
+/third_party/
+/third-party/
+/external/
+/externals/
+/deps/
+/dependencies/
+/subrepos/
+/subprojects/
+/packages/
+/lib/
+/libs/
+
+# Node (just in case someone adds JS tooling later)
+node_modules/
+jspm_packages/
+bower_components/
+.npm/
+.yarn/
+.pnp.*
+
+# Rust (future-proofing)
+/target/
+Cargo.lock.bak
+
+# Go
+/bin/
+/pkg/
+
+# Ruby
+/.bundle/
+vendor/bundle/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+
+# ── 14. Benchmark / profiling output ───────────────────────────────
+
+*.prof
+*.lprof
+*.pstat
+*.memprof
+prof/
+profile.out
+perf.data
+perf.data.old
+flamegraph*.svg
+!docs/**/*.svg
+
+# py-spy, scalene, cProfile output
+*.py-spy
+*.scalene
+
+
+# ── 15. Local developer scratch space ──────────────────────────────
+#
+# Per-developer experiment directories that shouldn't be committed.
+# Use `scratch/` or `sandbox/` at the repo root for throwaway work.
+
+/scratch/
+/sandbox/
+/playground/
+/experiments/
+/wip/
+TODO.local
+NOTES.local
+SCRATCH.md
+SCRATCH.local.md
+
+
+# ── 16. Documentation build output ─────────────────────────────────
+
+docs/_build/
+docs/build/
+docs/.doctrees/
+site/
+_site/
+.jekyll-cache/
+.jekyll-metadata
+.sphinx-build/
+
+
+# ── 17. Miscellaneous ──────────────────────────────────────────────
+
+# Hatchling / flit local build state
+.hatch/
+
+# direnv
+.direnv/
+
+# pre-commit
+.pre-commit-cache/
+
+# Task runners
+.task/
+
+# ctags / etags
+tags
+TAGS
+.tags
+.ctags
+.etags

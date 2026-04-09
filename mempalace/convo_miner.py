@@ -8,16 +8,21 @@ Normalizes format, chunks by exchange pair (Q+A = one unit), files to palace.
 Same palace as project mining. Different ingest strategy.
 """
 
-import os
-import sys
 import hashlib
-from pathlib import Path
-from datetime import datetime
+import logging
+import os
 from collections import defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
 
-import chromadb
+import chromadb.errors
 
+from .miner import file_already_mined
 from .normalize import normalize
+from .palace_io import open_collection
+from .trie_index import TrieIndex, trie_db_path
+
+logger = logging.getLogger("mempalace.convo_miner")
 
 
 # File types that might contain conversations
@@ -44,6 +49,16 @@ SKIP_DIRS = {
 }
 
 MIN_CHUNK_SIZE = 30
+# Max number of AI response lines to keep per user turn. Conversations
+# sometimes produce giant AI monologues; we clip after this many lines
+# so a single exchange doesn't become 5000 tokens.
+MAX_AI_LINES_PER_TURN = 8
+# Paragraphless fallback chunking: group N lines together as one chunk.
+LINE_GROUP_SIZE = 25
+# Chars of conversation content sampled for room detection. Slightly
+# larger than the miner's 2000-char window because conversation openers
+# are often chatty noise before the real topic appears.
+ROOM_DETECTION_WINDOW = 3000
 
 
 # =============================================================================
@@ -85,7 +100,7 @@ def _chunk_by_exchange(lines: list) -> list:
                     ai_lines.append(next_line.strip())
                 i += 1
 
-            ai_response = " ".join(ai_lines[:8])
+            ai_response = " ".join(ai_lines[:MAX_AI_LINES_PER_TURN])
             content = f"{user_turn}\n{ai_response}" if ai_response else user_turn
 
             if len(content.strip()) > MIN_CHUNK_SIZE:
@@ -109,8 +124,8 @@ def _chunk_by_paragraph(content: str) -> list:
     # If no paragraph breaks and long content, chunk by line groups
     if len(paragraphs) <= 1 and content.count("\n") > 20:
         lines = content.split("\n")
-        for i in range(0, len(lines), 25):
-            group = "\n".join(lines[i : i + 25]).strip()
+        for i in range(0, len(lines), LINE_GROUP_SIZE):
+            group = "\n".join(lines[i : i + LINE_GROUP_SIZE]).strip()
             if len(group) > MIN_CHUNK_SIZE:
                 chunks.append({"content": group, "chunk_index": len(chunks)})
         return chunks
@@ -195,7 +210,7 @@ TOPIC_KEYWORDS = {
 
 def detect_convo_room(content: str) -> str:
     """Score conversation content against topic keywords."""
-    content_lower = content[:3000].lower()
+    content_lower = content[:ROOM_DETECTION_WINDOW].lower()
     scores = {}
     for room, keywords in TOPIC_KEYWORDS.items():
         score = sum(1 for kw in keywords if kw in content_lower)
@@ -204,28 +219,6 @@ def detect_convo_room(content: str) -> str:
     if scores:
         return max(scores, key=scores.get)
     return "general"
-
-
-# =============================================================================
-# PALACE OPERATIONS
-# =============================================================================
-
-
-def get_collection(palace_path: str):
-    os.makedirs(palace_path, exist_ok=True)
-    client = chromadb.PersistentClient(path=palace_path)
-    try:
-        return client.get_collection("mempalace_drawers")
-    except Exception:
-        return client.create_collection("mempalace_drawers")
-
-
-def file_already_mined(collection, source_file: str) -> bool:
-    try:
-        results = collection.get(where={"source_file": source_file}, limit=1)
-        return len(results.get("ids", [])) > 0
-    except Exception:
-        return False
 
 
 # =============================================================================
@@ -261,12 +254,16 @@ def mine_convos(
     limit: int = 0,
     dry_run: bool = False,
     extract_mode: str = "exchange",
+    model: str | None = None,
 ):
     """Mine a directory of conversation files into the palace.
 
     extract_mode:
         "exchange" — default exchange-pair chunking (Q+A = one unit)
         "general"  — general extractor: decisions, preferences, milestones, problems, emotions
+
+    ``model`` selects which embedding model's collection to write to.
+    ``None`` (the default) uses the palace's configured default model.
     """
 
     convo_path = Path(convo_dir).expanduser().resolve()
@@ -288,7 +285,8 @@ def mine_convos(
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
 
-    collection = get_collection(palace_path) if not dry_run else None
+    collection = open_collection(palace_path, model=model, create=True) if not dry_run else None
+    trie = TrieIndex(db_path=trie_db_path(palace_path)) if not dry_run else None
 
     total_drawers = 0
     files_skipped = 0
@@ -324,10 +322,7 @@ def mine_convos(
             continue
 
         # Detect room from content (general mode uses memory_type instead)
-        if extract_mode != "general":
-            room = detect_convo_room(content)
-        else:
-            room = None  # set per-chunk below
+        room = detect_convo_room(content) if extract_mode != "general" else None
 
         if dry_run:
             if extract_mode == "general":
@@ -352,32 +347,39 @@ def mine_convos(
 
         # File each chunk
         drawers_added = 0
+        trie_buffer: list = []
         for chunk in chunks:
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts[chunk_room] += 1
             drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.md5((source_file + str(chunk['chunk_index'])).encode(), usedforsecurity=False).hexdigest()[:16]}"
+            metadata = {
+                "wing": wing,
+                "room": chunk_room,
+                "source_file": source_file,
+                "chunk_index": chunk["chunk_index"],
+                "added_by": agent,
+                "filed_at": datetime.now(UTC).isoformat(),
+                "ingest_mode": "convos",
+                "extract_mode": extract_mode,
+            }
             try:
                 collection.add(
                     documents=[chunk["content"]],
                     ids=[drawer_id],
-                    metadatas=[
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": datetime.now().isoformat(),
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                        }
-                    ],
+                    metadatas=[metadata],
                 )
                 drawers_added += 1
-            except Exception as e:
+                trie_buffer.append((drawer_id, chunk["content"], metadata))
+            except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
+                # Chroma reports duplicate IDs by raising with "already exists"
+                # in the message — that's a no-op for incremental mining.
                 if "already exists" not in str(e).lower():
                     raise
+
+        # Flush this file's postings in a single SQLite transaction.
+        if trie is not None and trie_buffer:
+            trie.add_batch(trie_buffer)
 
         total_drawers += drawers_added
         print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
@@ -393,12 +395,3 @@ def mine_convos(
             print(f"    {room:20} {count} files")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python convo_miner.py <convo_dir> [--palace PATH] [--limit N] [--dry-run]")
-        sys.exit(1)
-    from .config import MempalaceConfig
-
-    mine_convos(sys.argv[1], palace_path=MempalaceConfig().palace_path)

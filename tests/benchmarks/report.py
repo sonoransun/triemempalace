@@ -9,7 +9,6 @@ import json
 import os
 import tempfile
 
-
 RESULTS_FILE = os.path.join(tempfile.gettempdir(), "mempalace_bench_results.json")
 
 

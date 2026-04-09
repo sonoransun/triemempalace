@@ -17,11 +17,9 @@ Usage:
 
 import json
 import re
-import urllib.request
 import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Optional
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Common English words that could be confused with names
@@ -297,7 +295,7 @@ class EntityRegistry:
     # ── Load / Save ──────────────────────────────────────────────────────────
 
     @classmethod
-    def load(cls, config_dir: Optional[Path] = None) -> "EntityRegistry":
+    def load(cls, config_dir: Path | None = None) -> "EntityRegistry":
         path = (Path(config_dir) / "entity_registry.json") if config_dir else cls.DEFAULT_PATH
         if path.exists():
             try:
@@ -457,7 +455,7 @@ class EntityRegistry:
             "needs_disambiguation": False,
         }
 
-    def _disambiguate(self, word: str, context: str, person_info: dict) -> Optional[dict]:
+    def _disambiguate(self, word: str, context: str, person_info: dict) -> dict | None:
         """
         When a word is both a name and a common word, check context.
         Returns person result if context suggests a name, None if ambiguous.
@@ -552,7 +550,7 @@ class EntityRegistry:
         Scan session text for new entity candidates.
         Returns list of newly discovered candidates for review.
         """
-        from mempalace.entity_detector import extract_candidates, score_entity, classify_entity
+        from mempalace.entity_detector import classify_entity, extract_candidates, score_entity
 
         lines = text.splitlines()
         candidates = extract_candidates(text)
@@ -603,12 +601,10 @@ class EntityRegistry:
                     # For ambiguous words, check context
                     if name.lower() in self.ambiguous_flags:
                         result = self._disambiguate(name, query, info)
-                        if result and result["type"] == "person":
-                            if canonical not in found:
-                                found.append(canonical)
-                    else:
-                        if canonical not in found:
+                        if result and result["type"] == "person" and canonical not in found:
                             found.append(canonical)
+                    elif canonical not in found:
+                        found.append(canonical)
         return found
 
     def extract_unknown_candidates(self, query: str) -> list:

@@ -15,11 +15,10 @@ Usage:
     confirmed = confirm_entities(candidates)  # interactive review
 """
 
-import re
 import os
-from pathlib import Path
+import re
 from collections import defaultdict
-
+from pathlib import Path
 
 # ==================== SIGNAL PATTERNS ====================
 
@@ -174,7 +173,6 @@ STOPWORDS = {
     "here",
     "there",
     "now",
-    "then",
     "too",
     "up",
     "out",
@@ -201,14 +199,11 @@ STOPWORDS = {
     "all",
     "any",
     "some",
-    "true",
-    "false",
     "return",
     "print",
     "def",
     "class",
     "import",
-    "from",
     # Common capitalized words in prose that aren't entities
     "step",
     "usage",
@@ -216,7 +211,6 @@ STOPWORDS = {
     "check",
     "find",
     "add",
-    "get",
     "set",
     "list",
     "args",
@@ -262,7 +256,6 @@ STOPWORDS = {
     "returns",
     "raises",
     "yields",
-    "none",
     "self",
     "cls",
     "kwargs",
@@ -318,7 +311,6 @@ STOPWORDS = {
     "thank",
     "right",
     "let",
-    "ok",
     # UI/action words that appear in how-to content
     "click",
     "hit",
@@ -341,13 +333,10 @@ STOPWORDS = {
     "cancel",
     "confirm",
     "delete",
-    "copy",
     "paste",
-    "type",
     "write",
     "read",
     "search",
-    "find",
     "show",
     "hide",
     # Common filesystem/technical capitalized words
@@ -358,7 +347,6 @@ STOPWORDS = {
     "home",
     "library",
     "applications",
-    "system",
     "preferences",
     "settings",
     "terminal",
@@ -649,14 +637,14 @@ def detect_entities(file_paths: list, max_files: int = 10) -> dict:
     all_lines = []
     files_read = 0
 
-    MAX_BYTES_PER_FILE = 5_000  # first 5KB per file — enough to catch recurring entities
+    max_bytes_per_file = 5_000  # first 5KB per file — enough to catch recurring entities
 
     for filepath in file_paths:
         if files_read >= max_files:
             break
         try:
             with open(filepath, encoding="utf-8", errors="replace") as f:
-                content = f.read(MAX_BYTES_PER_FILE)
+                content = f.read(max_bytes_per_file)
             all_text.append(content)
             all_lines.extend(content.splitlines())
             files_read += 1
