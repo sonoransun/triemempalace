@@ -23,6 +23,8 @@ from .palace_io import open_collection
 from .trie_index import TrieIndex, trie_db_path
 
 logger = logging.getLogger("mempalace.convo_miner")
+from .normalize import normalize
+from .palace import SKIP_DIRS, get_collection, file_already_mined
 
 
 # File types that might contain conversations
@@ -31,21 +33,6 @@ CONVO_EXTENSIONS = {
     ".md",
     ".json",
     ".jsonl",
-}
-
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "env",
-    "dist",
-    "build",
-    ".next",
-    ".mempalace",
-    "tool-results",
-    "memory",
 }
 
 MIN_CHUNK_SIZE = 30
@@ -59,6 +46,7 @@ LINE_GROUP_SIZE = 25
 # larger than the miner's 2000-char window because conversation openers
 # are often chatty noise before the real topic appears.
 ROOM_DETECTION_WINDOW = 3000
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB — skip files larger than this
 
 
 # =============================================================================
@@ -221,6 +209,7 @@ def detect_convo_room(content: str) -> str:
     return "general"
 
 
+
 # =============================================================================
 # SCAN FOR CONVERSATION FILES
 # =============================================================================
@@ -237,6 +226,14 @@ def scan_convos(convo_dir: str) -> list:
                 continue
             filepath = Path(root) / filename
             if filepath.suffix.lower() in CONVO_EXTENSIONS:
+                # Skip symlinks and oversized files
+                if filepath.is_symlink():
+                    continue
+                try:
+                    if filepath.stat().st_size > MAX_FILE_SIZE:
+                        continue
+                except OSError:
+                    continue
                 files.append(filepath)
     return files
 

@@ -24,6 +24,8 @@ from .trie_index import TrieIndex, trie_db_path
 
 logger = logging.getLogger("mempalace.miner")
 
+from .palace import SKIP_DIRS, get_collection, file_already_mined
+
 READABLE_EXTENSIONS = {
     ".txt",
     ".md",
@@ -47,32 +49,6 @@ READABLE_EXTENSIONS = {
     ".toml",
 }
 
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "env",
-    "dist",
-    "build",
-    ".next",
-    "coverage",
-    ".mempalace",
-    ".ruff_cache",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".cache",
-    ".tox",
-    ".nox",
-    ".idea",
-    ".vscode",
-    ".ipynb_checkpoints",
-    ".eggs",
-    "htmlcov",
-    "target",
-}
-
 SKIP_FILENAMES = {
     "mempalace.yaml",
     "mempalace.yml",
@@ -89,6 +65,7 @@ MIN_CHUNK_SIZE = 50  # skip tiny chunks
 # enough that large files don't pay a full-file scan cost, large enough
 # to catch a section header or keyword-rich opening paragraph.
 ROOM_DETECTION_WINDOW = 2000
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB — skip files larger than this
 
 
 # =============================================================================
@@ -490,7 +467,7 @@ def process_file(
 
     # Skip if already filed
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file):
+    if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
         return 0, None
 
     try:
@@ -591,6 +568,17 @@ def scan_project(
                 and not force_include
                 and is_gitignored(filepath, active_matchers, is_dir=False)
             ):
+            if respect_gitignore and active_matchers and not force_include:
+                if is_gitignored(filepath, active_matchers, is_dir=False):
+                    continue
+            # Skip symlinks — prevents following links to /dev/urandom, etc.
+            if filepath.is_symlink():
+                continue
+            # Skip files exceeding size limit
+            try:
+                if filepath.stat().st_size > MAX_FILE_SIZE:
+                    continue
+            except OSError:
                 continue
             files.append(filepath)
     return files

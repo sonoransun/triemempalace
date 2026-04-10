@@ -1,6 +1,6 @@
 [project]
 name = "mempalace"
-version = "3.0.14"
+version = "3.1.0"
 description = "Give your AI a memory — mine projects and conversations into a searchable palace. No API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,9 +25,13 @@ classifiers = [
 ]
 dependencies = [
     "chromadb>=0.5.0,<0.7",
+<<<<<<< HEAD
     "pyyaml>=6.0",
     "lmdb>=1.4",
     "pyroaring>=0.4",
+=======
+    "pyyaml>=6.0,<7",
+>>>>>>> upstream/main
 ]
 
 [project.urls]

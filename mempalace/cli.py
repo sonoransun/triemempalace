@@ -14,6 +14,7 @@ Commands:
     mempalace mine <dir>                  Mine project files (default)
     mempalace mine <dir> --mode convos    Mine conversation exports
     mempalace search "query"              Find anything, exact words
+    mempalace mcp                         Show MCP setup command
     mempalace wake-up                     Show L0 + L1 wake-up context
     mempalace wake-up --wing my_app       Wake-up for a specific project
     mempalace status                      Show what's been filed
@@ -30,6 +31,7 @@ import argparse
 import logging
 import os
 import sys
+import shlex
 from pathlib import Path
 
 import lmdb
@@ -319,6 +321,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
     print(f"  Extracted {len(all_ids)} drawers")
 
     # Backup and rebuild
+    palace_path = palace_path.rstrip(os.sep)
     backup_path = palace_path + ".backup"
     if Path(backup_path).exists():
         shutil.rmtree(backup_path)
@@ -631,7 +634,28 @@ def cmd_instructions(args: argparse.Namespace) -> None:
     run_instructions(name=args.name)
 
 
-def cmd_compress(args: argparse.Namespace) -> None:
+def cmd_mcp(args):
+    """Show how to wire MemPalace into MCP-capable hosts."""
+    base_server_cmd = "python -m mempalace.mcp_server"
+
+    if args.palace:
+        resolved_palace = str(Path(args.palace).expanduser())
+        server_cmd = f"{base_server_cmd} --palace {shlex.quote(resolved_palace)}"
+    else:
+        server_cmd = base_server_cmd
+
+    print("MemPalace MCP quick setup:")
+    print(f"  claude mcp add mempalace -- {server_cmd}")
+    print("\nRun the server directly:")
+    print(f"  {server_cmd}")
+
+    if not args.palace:
+        print("\nOptional custom palace:")
+        print(f"  claude mcp add mempalace -- {base_server_cmd} --palace /path/to/palace")
+        print(f"  {base_server_cmd} --palace /path/to/palace")
+
+
+def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
     import chromadb
 
@@ -1137,6 +1161,10 @@ def main() -> None:
         "--model",
         default="llama3.1:8b",
         help="Ollama model for --mode ollama (default: llama3.1:8b)",
+    # mcp
+    sub.add_parser(
+        "mcp",
+        help="Show MCP setup command for connecting MemPalace to your AI client",
     )
 
     # status
@@ -1178,6 +1206,7 @@ def main() -> None:
         "mine": cmd_mine,
         "split": cmd_split,
         "search": cmd_search,
+        "mcp": cmd_mcp,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
