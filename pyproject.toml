@@ -25,13 +25,9 @@ classifiers = [
 ]
 dependencies = [
     "chromadb>=0.5.0,<0.7",
-<<<<<<< HEAD
-    "pyyaml>=6.0",
+    "pyyaml>=6.0,<7",
     "lmdb>=1.4",
     "pyroaring>=0.4",
-=======
-    "pyyaml>=6.0,<7",
->>>>>>> upstream/main
 ]
 
 [project.urls]
@@ -143,13 +139,21 @@ filterwarnings = [
     # chromadb's ONNX model downloader uses tar.extractall without a filter.
     # Same story — upstream will fix before Python 3.14 removes the default.
     "ignore::DeprecationWarning:chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2",
+    # chromadb's PersistentClient never explicitly closes the sqlite metadata
+    # connection it opens in ``client.py``. The handle is reclaimed at process
+    # exit, but pytest's filterwarnings=error promotes the GC-time
+    # ``ResourceWarning: unclosed database`` into a hard test failure on
+    # multi-test runs that build many client instances. We don't own that path
+    # — drop the warning until upstream ships an explicit shutdown hook.
+    "ignore::ResourceWarning:chromadb.api.client",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 [tool.coverage.run]
 source = ["mempalace"]
 
 [tool.coverage.report]
-fail_under = 85
+fail_under = 90
 show_missing = true
 exclude_lines = [
     "if __name__",

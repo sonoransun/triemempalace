@@ -18,8 +18,6 @@ function so tests can exercise the coexistence / resolution code paths
 without hitting the network or the filesystem.
 """
 
-from __future__ import annotations
-
 import hashlib
 import sys
 

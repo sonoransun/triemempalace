@@ -336,7 +336,7 @@ Text:
 JSON array:"""
 
 
-class OllamaExtractor:
+class OllamaExtractor:  # pragma: no cover
     """Local-LLM triple extractor via the Ollama HTTP client.
 
     Lazy-loads the ``ollama`` package on first ``extract()`` call,

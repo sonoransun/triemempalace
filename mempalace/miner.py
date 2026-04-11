@@ -16,7 +16,6 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-import chromadb
 import chromadb.errors
 
 from .palace_io import open_collection
@@ -24,7 +23,32 @@ from .trie_index import TrieIndex, trie_db_path
 
 logger = logging.getLogger("mempalace.miner")
 
-from .palace import SKIP_DIRS, get_collection, file_already_mined
+# Directories the miner refuses to descend into. Shared with convo_miner.py.
+SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    "dist",
+    "build",
+    ".next",
+    "coverage",
+    ".mempalace",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".cache",
+    ".tox",
+    ".nox",
+    ".idea",
+    ".vscode",
+    ".ipynb_checkpoints",
+    ".eggs",
+    "htmlcov",
+    "target",
+}
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -467,7 +491,7 @@ def process_file(
 
     # Skip if already filed
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
+    if not dry_run and file_already_mined(collection, source_file):
         return 0, None
 
     try:
@@ -568,9 +592,7 @@ def scan_project(
                 and not force_include
                 and is_gitignored(filepath, active_matchers, is_dir=False)
             ):
-            if respect_gitignore and active_matchers and not force_include:
-                if is_gitignored(filepath, active_matchers, is_dir=False):
-                    continue
+                continue
             # Skip symlinks — prevents following links to /dev/urandom, etc.
             if filepath.is_symlink():
                 continue

@@ -4,7 +4,6 @@ import chromadb
 import yaml
 
 from mempalace.miner import mine, scan_project
-from mempalace.palace import file_already_mined
 
 
 def write_file(path: Path, content: str):
@@ -163,63 +162,118 @@ def test_scan_project_skip_dirs_still_apply_without_override(tmp_path):
     write_file(project_root / ".pytest_cache" / "cache.py", "print('cache')\n" * 20)
     write_file(project_root / "main.py", "print('main')\n" * 20)
 
-<<<<<<< HEAD
     assert scanned_files(project_root, respect_gitignore=False) == ["main.py"]
-=======
-        assert scanned_files(project_root, respect_gitignore=False) == ["main.py"]
-    finally:
-        shutil.rmtree(tmpdir)
 
 
-def test_file_already_mined_check_mtime():
-    tmpdir = tempfile.mkdtemp()
-    try:
-        palace_path = os.path.join(tmpdir, "palace")
-        os.makedirs(palace_path)
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_drawers")
+def test_scan_project_skips_symlinks(tmp_path):
+    """Symlinks are skipped so scan_project can't follow them to /dev/urandom."""
+    project_root = tmp_path.resolve()
+    write_file(project_root / "real.py", "print('real')\n" * 20)
+    (project_root / "link.py").symlink_to(project_root / "real.py")
+    files = scanned_files(project_root, respect_gitignore=False)
+    # real.py is present, the symlink is not (symlinks are skipped).
+    assert files == ["real.py"]
 
-        test_file = os.path.join(tmpdir, "test.txt")
-        with open(test_file, "w") as f:
-            f.write("hello world")
 
-        mtime = os.path.getmtime(test_file)
+def test_scan_project_respects_max_file_size(tmp_path, monkeypatch):
+    """Files over MAX_FILE_SIZE are skipped without opening them."""
+    import mempalace.miner as miner_mod
 
-        # Not mined yet
-        assert file_already_mined(col, test_file) is False
-        assert file_already_mined(col, test_file, check_mtime=True) is False
+    monkeypatch.setattr(miner_mod, "MAX_FILE_SIZE", 64)  # tiny for testing
+    project_root = tmp_path.resolve()
+    write_file(project_root / "tiny.py", "a = 1\n")
+    write_file(project_root / "big.py", "b = 1\n" * 100)  # 600+ bytes
+    files = scanned_files(project_root, respect_gitignore=False)
+    assert "tiny.py" in files
+    assert "big.py" not in files
 
-        # Add it with mtime
-        col.add(
-            ids=["d1"],
-            documents=["hello world"],
-            metadatas=[{"source_file": test_file, "source_mtime": str(mtime)}],
-        )
 
-        # Already mined (no mtime check)
-        assert file_already_mined(col, test_file) is True
-        # Already mined (mtime matches)
-        assert file_already_mined(col, test_file, check_mtime=True) is True
+def test_status_on_missing_palace(tmp_path, capsys):
+    """status() prints the 'no palace' message when the collection can't open."""
+    from mempalace.miner import status
 
-        # Modify file and force a different mtime (Windows has low mtime resolution)
-        with open(test_file, "w") as f:
-            f.write("modified content")
-        os.utime(test_file, (mtime + 10, mtime + 10))
+    status(palace_path=str(tmp_path / "nonexistent"))
+    out = capsys.readouterr().out
+    assert "No palace found" in out
 
-        # Still mined without mtime check
-        assert file_already_mined(col, test_file) is True
-        # Needs re-mining with mtime check
-        assert file_already_mined(col, test_file, check_mtime=True) is False
 
-        # Record with no mtime stored should return False for check_mtime
-        col.add(
-            ids=["d2"],
-            documents=["other"],
-            metadatas=[{"source_file": "/fake/no_mtime.txt"}],
-        )
-        assert file_already_mined(col, "/fake/no_mtime.txt", check_mtime=True) is False
-    finally:
-        # Release ChromaDB file handles before cleanup (required on Windows)
-        del col, client
-        shutil.rmtree(tmpdir, ignore_errors=True)
->>>>>>> upstream/main
+def test_status_on_seeded_palace(tmp_path, capsys):
+    """status() tallies drawers by wing and room from a live collection."""
+    from mempalace.miner import status
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.get_or_create_collection("mempalace_drawers")
+    col.add(
+        ids=["d1", "d2", "d3"],
+        documents=["alpha", "beta", "gamma"],
+        metadatas=[
+            {"wing": "project", "room": "backend"},
+            {"wing": "project", "room": "backend"},
+            {"wing": "notes", "room": "planning"},
+        ],
+    )
+    del col, client
+
+    status(palace_path=str(palace))
+    out = capsys.readouterr().out
+    assert "3 drawers" in out
+    assert "project" in out
+    assert "backend" in out
+    assert "planning" in out
+
+
+def test_file_already_mined_unmined_returns_false(tmp_path):
+    """A file that was never filed returns False."""
+    from mempalace.miner import file_already_mined
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.get_or_create_collection("mempalace_drawers")
+
+    src = tmp_path / "src.py"
+    src.write_text("hello")
+    assert file_already_mined(col, str(src)) is False
+
+
+def test_file_already_mined_matching_mtime_returns_true(tmp_path):
+    """A file that's been filed with the same mtime returns True."""
+    from mempalace.miner import file_already_mined
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.get_or_create_collection("mempalace_drawers")
+
+    src = tmp_path / "src.py"
+    src.write_text("hello")
+    mtime = src.stat().st_mtime
+
+    col.add(
+        ids=["d1"],
+        documents=["hello"],
+        metadatas=[{"source_file": str(src), "source_mtime": str(mtime)}],
+    )
+    assert file_already_mined(col, str(src)) is True
+
+
+def test_file_already_mined_stale_mtime_returns_false(tmp_path):
+    """A file whose mtime no longer matches the stored mtime returns False."""
+    from mempalace.miner import file_already_mined
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.get_or_create_collection("mempalace_drawers")
+
+    src = tmp_path / "src.py"
+    src.write_text("hello")
+
+    col.add(
+        ids=["d1"],
+        documents=["hello"],
+        metadatas=[{"source_file": str(src), "source_mtime": "0.0"}],  # stale
+    )
+    assert file_already_mined(col, str(src)) is False

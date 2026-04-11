@@ -96,6 +96,7 @@ def open_collection(
     *,
     model: str | None = None,
     create: bool = False,
+    collection_name_override: str | None = None,
 ) -> Any:
     """Open the Chroma collection bound to ``model`` under ``palace_path``.
 
@@ -105,11 +106,18 @@ def open_collection(
         Path to the palace directory. Created if missing.
     model:
         Embedding model slug. ``None`` means "use the palace's default
-        model" from :class:`mempalace.config.MempalaceConfig`.
+        model" from :class:`mempalace.config.MempalaceConfig`. Ignored
+        when ``collection_name_override`` is set.
     create:
         If ``True``, create the collection if it doesn't exist. If
         ``False`` (the default), raise whatever Chroma raises on a
         missing collection.
+    collection_name_override:
+        Bypass the model→name lookup entirely and open the named
+        collection directly using Chroma's built-in embedding. The only
+        sanctioned caller is ``mempalace compress`` which writes to the
+        ``mempalace_compressed`` sidecar collection that isn't part of
+        the embedding registry.
 
     Returns
     -------
@@ -131,6 +139,23 @@ def open_collection(
       mode handled by the searcher, not a real collection. Passing it
       raises ``ValueError``.
     """
+    if collection_name_override is not None:
+        client = _get_client(palace_path)
+        canonical_palace = _canonical(palace_path)
+        collection_name = collection_name_override
+        cache_key = (canonical_palace, collection_name)
+        with _lock:
+            cached = _collection_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        if create:
+            col = client.get_or_create_collection(collection_name)
+        else:
+            col = client.get_collection(collection_name)
+        with _lock:
+            _collection_cache[cache_key] = col
+        return col
+
     slug = _resolve_model(model)
     if slug == "all":
         raise ValueError(
@@ -185,6 +210,36 @@ def open_collection(
     with _lock:
         _collection_cache[cache_key] = col
     return col
+
+
+def delete_collection(
+    palace_path: str,
+    *,
+    model: str | None = None,
+    collection_name_override: str | None = None,
+) -> None:
+    """Drop a collection by name from the underlying Chroma client.
+
+    Used by ``mempalace repair`` between the read-old / create-new
+    cycle. Resolves the same (model | override) → name mapping as
+    :func:`open_collection` and invalidates the cache for the dropped
+    name so the next ``open_collection`` returns a fresh handle.
+    """
+    client = _get_client(palace_path)
+    canonical_palace = _canonical(palace_path)
+    if collection_name_override is not None:
+        collection_name = collection_name_override
+    else:
+        slug = _resolve_model(model)
+        if slug == "all":
+            raise ValueError(
+                "delete_collection: model='all' is a query-time fan-out mode, "
+                "not a real collection."
+            )
+        collection_name = _embeddings.collection_name_for(slug)
+    client.delete_collection(collection_name)
+    with _lock:
+        _collection_cache.pop((canonical_palace, collection_name), None)
 
 
 def close_all() -> None:

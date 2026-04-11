@@ -18,6 +18,7 @@ Tools (write):
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import logging
@@ -30,17 +31,7 @@ import chromadb.errors
 import lmdb
 
 from . import embeddings as _embeddings
-from .config import MempalaceConfig
-import hashlib
-from datetime import datetime
-from pathlib import Path
-
-from .config import MempalaceConfig, sanitize_name, sanitize_content
-from .version import __version__
-from .searcher import search_memories
-from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
-
+from .config import MempalaceConfig, sanitize_content, sanitize_name
 from .knowledge_graph import KnowledgeGraph
 from .palace_graph import find_tunnels, graph_stats, traverse
 from .palace_io import open_collection
@@ -101,7 +92,11 @@ def _get_collection(create=False, *, model=None):
         col = open_collection(_config.palace_path, model=slug, create=create)
     except (OSError, chromadb.errors.ChromaError) as e:
         logger.debug("mcp: collection open failed (model=%s) — %s", slug, e)
-=======
+        return None
+    _collection_cache[slug] = col
+    return col
+
+
 # ==================== WRITE-AHEAD LOG ====================
 # Every write operation is logged to a JSONL file before execution.
 # This provides an audit trail for detecting memory poisoning and
@@ -109,17 +104,16 @@ def _get_collection(create=False, *, model=None):
 
 _WAL_DIR = Path(os.path.expanduser("~/.mempalace/wal"))
 _WAL_DIR.mkdir(parents=True, exist_ok=True)
-try:
+# Windows doesn't support Unix permissions; chmod is a no-op there.
+with contextlib.suppress(OSError, NotImplementedError):
     _WAL_DIR.chmod(0o700)
-except (OSError, NotImplementedError):
-    pass
 _WAL_FILE = _WAL_DIR / "write_log.jsonl"
 
 
-def _wal_log(operation: str, params: dict, result: dict = None):
+def _wal_log(operation: str, params: dict, result: dict | None = None) -> None:
     """Append a write operation to the write-ahead log."""
     entry = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "operation": operation,
         "params": params,
         "result": result,
@@ -127,41 +121,13 @@ def _wal_log(operation: str, params: dict, result: dict = None):
     try:
         with open(_WAL_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
-        try:
+        with contextlib.suppress(OSError, NotImplementedError):
             _WAL_FILE.chmod(0o600)
-        except (OSError, NotImplementedError):
-            pass
-    except Exception as e:
-        logger.error(f"WAL write failed: {e}")
-
-
-_client_cache = None
-_collection_cache = None
-
-
-def _get_client():
-    """Return a singleton ChromaDB PersistentClient."""
-    global _client_cache
-    if _client_cache is None:
-        _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-    return _client_cache
-
-
-def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
-    global _collection_cache
-    try:
-        client = _get_client()
-        if create:
-            _collection_cache = client.get_or_create_collection(_config.collection_name)
-        elif _collection_cache is None:
-            _collection_cache = client.get_collection(_config.collection_name)
-        return _collection_cache
-    except Exception:
->>>>>>> upstream/main
-        return None
-    _collection_cache[slug] = col
-    return col
+    except OSError as e:
+        # Defensive: WAL writes are best-effort. The audit log must never
+        # block the actual operation, so a failed open/write/chmod degrades
+        # to an error log instead of propagating to the MCP caller.
+        logger.error("WAL write failed: %s", e)
 
 
 def _get_trie_index():
@@ -605,6 +571,7 @@ def tool_add_drawer(
     drawer_id = (
         f"drawer_{wing}_{room}_"
         f"{hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:16]}"
+    )
 
     _wal_log(
         "add_drawer",
@@ -773,17 +740,16 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general") -> dic
     entry_hash = hashlib.md5(entry[:50].encode(), usedforsecurity=False).hexdigest()[:8]
     entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{entry_hash}"
 
-    try:
-        metadata = {
-            "wing": wing,
-            "room": room,
-            "hall": "hall_diary",
-            "topic": topic,
-            "type": "diary_entry",
-            "agent": agent_name,
-            "filed_at": now.isoformat(),
-            "date": now.strftime("%Y-%m-%d"),
-        }
+    metadata = {
+        "wing": wing,
+        "room": room,
+        "hall": "hall_diary",
+        "topic": topic,
+        "type": "diary_entry",
+        "agent": agent_name,
+        "filed_at": now.isoformat(),
+        "date": now.strftime("%Y-%m-%d"),
+    }
 
     _wal_log(
         "diary_write",
@@ -796,10 +762,6 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general") -> dic
     )
 
     try:
-        # TODO: Future versions should expand AAAK before embedding to improve
-        # semantic search quality. For now, store raw AAAK in metadata so it's
-        # preserved, and keep the document as-is for embedding (even though
-        # compressed AAAK degrades embedding quality).
         col.add(
             ids=[entry_id],
             documents=[entry],
@@ -1443,7 +1405,7 @@ def handle_request(request):
     }
 
 
-def main():
+def main():  # pragma: no cover
     logger.info("MemPalace MCP Server starting...")
 
     # Warm the trie bitmap LRU on startup so the first query for any hot

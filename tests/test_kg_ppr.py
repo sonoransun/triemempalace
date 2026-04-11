@@ -285,3 +285,87 @@ class TestKgPprCandidates:
         bob_drawers = {"drawer_005", "drawer_006"}
         assert result["drawer_ids"] & alice_drawers
         assert result["drawer_ids"] & bob_drawers
+
+
+# ── Error paths and integration with searcher ──────────────────────
+
+
+class TestKgPprErrorPaths:
+    """Graceful-degradation coverage for the kg_ppr read path.
+
+    searcher.hybrid_search wraps the kg_ppr call in a broad try/except so
+    a missing/empty/corrupt KG never breaks the retrieval pipeline. These
+    tests pin that contract: every failure mode must return cleanly.
+    """
+
+    def test_empty_kg_file_exists_but_no_triples(self, tmp_path):
+        """A KG with schema but zero triples returns an empty envelope.
+
+        The adjacency loader collapses "file exists but no triples" into
+        the same empty dict as "file missing", so kg_ppr_candidates flags
+        both with ``skipped_reason == "no_kg"``. Either way, the drawer
+        set is empty and the caller degrades gracefully.
+        """
+        kg = KnowledgeGraph(db_path=str(tmp_path / "empty.sqlite3"))
+        kg.close()  # just materialize the schema
+        result = kg_ppr_candidates("where does Alice work", kg_db_path=kg.db_path)
+        assert result["skipped_reason"] in ("no_kg", "no_seeds_in_graph")
+        assert result["drawer_ids"] == set()
+
+    def test_max_iter_bound_respected(self, small_kg):
+        """``max_iter=1`` still returns a valid (non-empty) score dict."""
+        scores = personalized_pagerank(
+            ["alice"],
+            kg_db_path=small_kg.db_path,
+            max_iter=1,
+            tol=1.0,  # force immediate exit
+        )
+        assert scores  # single iteration is enough to produce any output
+
+    def test_searcher_hybrid_search_with_missing_kg_does_not_raise(self, tmp_path, monkeypatch):
+        """
+        searcher.hybrid_search(..., enable_kg_ppr=True) must degrade gracefully
+        when the default KG path doesn't exist. Previously this was only
+        exercised via the internal broad try/except — now we pin it at the
+        integration boundary.
+        """
+        import chromadb
+
+        from mempalace import searcher
+
+        # Build a minimal palace with one drawer so the semantic query has
+        # something to rank.
+        palace = str(tmp_path / "palace")
+        client = chromadb.PersistentClient(path=palace)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.add(
+            ids=["d1"],
+            documents=["alpha beta gamma"],
+            metadatas=[
+                {
+                    "wing": "project",
+                    "room": "notes",
+                    "source_file": "n.md",
+                    "chunk_index": 0,
+                    "added_by": "test",
+                    "filed_at": "2026-01-01T00:00:00",
+                }
+            ],
+        )
+
+        # Point the module-level DEFAULT_KG_PATH at a nonexistent file.
+        from mempalace import knowledge_graph
+
+        monkeypatch.setattr(
+            knowledge_graph, "DEFAULT_KG_PATH", str(tmp_path / "nonexistent_kg.sqlite3")
+        )
+
+        # This is the contract: enable_kg_ppr=True with a missing KG must
+        # return a normal search envelope, not an exception.
+        result = searcher.hybrid_search(
+            "alpha",
+            palace_path=palace,
+            enable_kg_ppr=True,
+        )
+        assert "results" in result
+        assert isinstance(result["results"], list)

@@ -30,8 +30,8 @@ Examples:
 import argparse
 import logging
 import os
-import sys
 import shlex
+import sys
 from pathlib import Path
 
 import lmdb
@@ -270,11 +270,12 @@ def cmd_repair(args: argparse.Namespace) -> None:
     """
     import shutil
 
-    import chromadb
+    import chromadb.errors
 
-    palace_path = (
-        str(Path(args.palace).expanduser()) if args.palace else MempalaceConfig().palace_path
-    )
+    from .palace_io import delete_collection, drop_collection_cache, open_collection
+
+    config = MempalaceConfig()
+    palace_path = str(Path(args.palace).expanduser()) if args.palace else config.palace_path
 
     if not Path(palace_path).is_dir():
         print(f"\n  No palace found at {palace_path}")
@@ -285,42 +286,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    # Try to read existing drawers
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-        total = col.count()
-        print(f"  Drawers found: {total}")
-    except Exception as e:
-        # Broad catch: chromadb raises a mix of ChromaError, ValueError,
-        # and InvalidCollectionException subclasses depending on the
-        # exact failure (missing collection, corrupt db, schema mismatch).
-        # This is the CLI "read palace" boundary — one error message is
-        # all the user needs.
-        print(f"  Error reading palace: {e}")
-        print("  Cannot recover — palace may need to be re-mined from source files.")
-        return
-
-    if total == 0:
-        print("  Nothing to repair.")
-        return
-
-    # Extract all drawers in batches
-    print("\n  Extracting drawers...")
-    batch_size = 5000
-    all_ids = []
-    all_docs = []
-    all_metas = []
-    offset = 0
-    while offset < total:
-        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
-        all_ids.extend(batch["ids"])
-        all_docs.extend(batch["documents"])
-        all_metas.extend(batch["metadatas"])
-        offset += batch_size
-    print(f"  Extracted {len(all_ids)} drawers")
-
-    # Backup and rebuild
+    # Backup once for the whole palace, before touching any model collection.
     palace_path = palace_path.rstrip(os.sep)
     backup_path = palace_path + ".backup"
     if Path(backup_path).exists():
@@ -328,27 +294,65 @@ def cmd_repair(args: argparse.Namespace) -> None:
     print(f"  Backing up to {backup_path}...")
     shutil.copytree(palace_path, backup_path)
 
-    print("  Rebuilding collection...")
-    client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
+    last_rebuilt_col = None
+    grand_total = 0
+    for slug in config.enabled_embedding_models:
+        # Read existing drawers for this model.
+        try:
+            col = open_collection(palace_path, model=slug)
+            total = col.count()
+        except (OSError, chromadb.errors.ChromaError, ValueError) as e:
+            print(f"  [{slug}] skipped: {e}")
+            continue
 
-    filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
-        filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+        print(f"\n  [{slug}] {total} drawers")
+        if total == 0:
+            continue
 
-    # Rebuild the trie index from the freshly rebuilt collection so the
-    # keyword/temporal side stays consistent with the vectors.
+        batch_size = 5000
+        all_ids: list[str] = []
+        all_docs: list[str] = []
+        all_metas: list[dict] = []
+        offset = 0
+        while offset < total:
+            batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
+            all_ids.extend(batch["ids"])
+            all_docs.extend(batch["documents"])
+            all_metas.extend(batch["metadatas"])
+            offset += batch_size
+
+        # Drop and recreate this model's collection. drop_collection_cache
+        # invalidates the read handle so the create=True call below opens
+        # a fresh one.
+        delete_collection(palace_path, model=slug)
+        drop_collection_cache(palace_path)
+        new_col = open_collection(palace_path, model=slug, create=True)
+
+        filed = 0
+        for i in range(0, len(all_ids), batch_size):
+            batch_ids = all_ids[i : i + batch_size]
+            batch_docs = all_docs[i : i + batch_size]
+            batch_metas = all_metas[i : i + batch_size]
+            new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+            filed += len(batch_ids)
+            print(f"  [{slug}] re-filed {filed}/{len(all_ids)} drawers...")
+
+        grand_total += filed
+        last_rebuilt_col = new_col
+
+    if grand_total == 0:
+        print("  Nothing to repair.")
+        return
+
+    # Rebuild the trie index from the default-model collection so the
+    # keyword/temporal side stays consistent with the vectors. The trie
+    # is embedding-agnostic so we only rebuild it once.
     try:
         from .trie_index import TrieIndex, trie_db_path
 
         trie = TrieIndex(db_path=trie_db_path(palace_path))
-        trie_count = trie.rebuild_from_collection(new_col)
-        print(f"  Trie: reindexed {trie_count:,} postings from {filed} drawers")
+        trie_count = trie.rebuild_from_collection(last_rebuilt_col)
+        print(f"  Trie: reindexed {trie_count:,} postings from {grand_total} drawers")
         _remove_legacy_sqlite_trie(palace_path)
     except Exception as e:
         # Broad catch: trie rebuild involves lmdb (lmdb.Error), chromadb
@@ -357,7 +361,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
         # side fails.
         print(f"  Trie rebuild skipped: {e}")
 
-    print(f"\n  Repair complete. {filed} drawers rebuilt.")
+    print(f"\n  Repair complete. {grand_total} drawers rebuilt.")
     print(f"  Backup saved at {backup_path}")
     print(f"\n{'=' * 55}\n")
 
@@ -575,8 +579,9 @@ def cmd_trie_repair(args: argparse.Namespace) -> None:
     ``mempalace_drawers``. Use it after upgrading from a palace that was
     mined before the trie existed or with the previous SQLite backend.
     """
-    import chromadb
+    import chromadb.errors
 
+    from .palace_io import open_collection
     from .trie_index import TrieIndex, trie_db_path
 
     palace_path = (
@@ -588,12 +593,8 @@ def cmd_trie_repair(args: argparse.Namespace) -> None:
         return
 
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception as e:
-        # Broad catch: chromadb can raise many subclasses for a missing
-        # or corrupt palace; this is a CLI boundary that only needs to
-        # print a friendly message.
+        col = open_collection(palace_path)
+    except (OSError, chromadb.errors.ChromaError, ValueError) as e:
         print(f"\n  Could not open palace: {e}")
         return
 
@@ -657,9 +658,10 @@ def cmd_mcp(args):
 
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    import chromadb
+    import chromadb.errors
 
     from .dialect import Dialect
+    from .palace_io import open_collection
 
     palace_path = (
         str(Path(args.palace).expanduser()) if args.palace else MempalaceConfig().palace_path
@@ -679,12 +681,10 @@ def cmd_compress(args):
     else:
         dialect = Dialect()
 
-    # Connect to palace
+    # Connect to palace's default-model collection (read side).
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception as e:
-        # Broad catch: CLI boundary, any palace-open failure just prints.
+        col = open_collection(palace_path)
+    except (OSError, chromadb.errors.ChromaError, ValueError) as e:
         logger.debug("cmd_compress: palace open failed — %s", e)
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -757,7 +757,11 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = client.get_or_create_collection("mempalace_compressed")
+            comp_col = open_collection(
+                palace_path,
+                create=True,
+                collection_name_override="mempalace_compressed",
+            )
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)
@@ -1161,6 +1165,8 @@ def main() -> None:
         "--model",
         default="llama3.1:8b",
         help="Ollama model for --mode ollama (default: llama3.1:8b)",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",

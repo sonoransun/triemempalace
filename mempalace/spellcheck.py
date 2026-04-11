@@ -109,23 +109,16 @@ def _should_skip(token: str, known_names: set) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _load_known_names() -> set:
+def _load_known_names() -> set[str]:
     """Pull all registered names from EntityRegistry. Returns empty set on failure."""
     try:
         from mempalace.entity_registry import EntityRegistry
 
-        reg = EntityRegistry.load()
-        names = set()
-        for entity in reg._data.get("entities", {}).values():
-            names.add(entity.get("canonical", "").lower())
-            for alias in entity.get("aliases", []):
-                names.add(alias.lower())
-        return names
-    except Exception:
-        # Defensive: the registry load path touches several layers
-        # (file I/O, JSON parsing, optional network lookups for Wikipedia
-        # disambiguation). Any failure falls back to "no name protection"
-        # — never a fatal error for the spellchecker.
+        return EntityRegistry.load().iter_known_names()
+    except (OSError, ImportError):
+        # Defensive: the registry load path touches the filesystem.
+        # Any failure falls back to "no name protection" — never a
+        # fatal error for the spellchecker.
         return set()
 
 

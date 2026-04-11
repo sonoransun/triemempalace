@@ -1,10 +1,7 @@
 """Tests for mempalace.entity_registry."""
 
-from unittest.mock import patch
-
 from mempalace.entity_registry import (
     COMMON_ENGLISH_WORDS,
-    PERSON_CONTEXT_PATTERNS,
     EntityRegistry,
 )
 
@@ -22,13 +19,6 @@ def test_common_english_words_has_expected_entries():
 def test_common_english_words_is_lowercase():
     for word in COMMON_ENGLISH_WORDS:
         assert word == word.lower(), f"{word} should be lowercase"
-
-
-# ── PERSON_CONTEXT_PATTERNS ─────────────────────────────────────────────
-
-
-def test_person_context_patterns_is_nonempty():
-    assert len(PERSON_CONTEXT_PATTERNS) > 0
 
 
 # ── EntityRegistry creation and empty state ─────────────────────────────
@@ -60,6 +50,14 @@ def test_save_creates_file(tmp_path):
     registry = EntityRegistry.load(config_dir=tmp_path)
     registry.save()
     assert (tmp_path / "entity_registry.json").exists()
+
+
+def test_load_recovers_from_corrupt_json(tmp_path):
+    """A malformed registry file falls back to the empty default schema."""
+    (tmp_path / "entity_registry.json").write_text("{not json")
+    registry = EntityRegistry.load(config_dir=tmp_path)
+    assert registry.people == {}
+    assert registry.projects == []
 
 
 # ── seed ────────────────────────────────────────────────────────────────
@@ -132,168 +130,32 @@ def test_seed_skips_empty_names(tmp_path):
     assert len(registry.people) == 0
 
 
-# ── lookup ──────────────────────────────────────────────────────────────
+# ── iter_known_names (spellcheck integration) ──────────────────────────
 
 
-def test_lookup_known_person(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(
-        mode="personal",
-        people=[{"name": "Riley", "relationship": "daughter", "context": "personal"}],
-        projects=[],
-    )
-    result = registry.lookup("Riley")
-    assert result["type"] == "person"
-    assert result["confidence"] == 1.0
-    assert result["name"] == "Riley"
-
-
-def test_lookup_known_project(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(mode="work", people=[], projects=["MemPalace"])
-    result = registry.lookup("MemPalace")
-    assert result["type"] == "project"
-    assert result["confidence"] == 1.0
-
-
-def test_lookup_unknown_word(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(mode="personal", people=[], projects=[])
-    result = registry.lookup("Xyzzy")
-    assert result["type"] == "unknown"
-    assert result["confidence"] == 0.0
-
-
-def test_lookup_case_insensitive(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(
-        mode="personal",
-        people=[{"name": "Riley", "relationship": "daughter", "context": "personal"}],
-        projects=[],
-    )
-    result = registry.lookup("riley")
-    assert result["type"] == "person"
-
-
-def test_lookup_alias(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(
-        mode="personal",
-        people=[{"name": "Maxwell", "relationship": "friend", "context": "personal"}],
-        projects=[],
-        aliases={"Max": "Maxwell"},
-    )
-    result = registry.lookup("Max")
-    assert result["type"] == "person"
-
-
-# ── disambiguation ──────────────────────────────────────────────────────
-
-
-def test_lookup_ambiguous_word_as_person(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(
-        mode="personal",
-        people=[{"name": "Grace", "relationship": "friend", "context": "personal"}],
-        projects=[],
-    )
-    result = registry.lookup("Grace", context="I went with Grace today")
-    assert result["type"] == "person"
-
-
-def test_lookup_ambiguous_word_as_concept(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(
-        mode="personal",
-        people=[{"name": "Ever", "relationship": "friend", "context": "personal"}],
-        projects=[],
-    )
-    result = registry.lookup("Ever", context="have you ever tried this")
-    assert result["type"] == "concept"
-
-
-# ── research (Wikipedia) — mocked ──────────────────────────────────────
-
-
-def test_research_caches_result(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(mode="personal", people=[], projects=[])
-
-    mock_result = {
-        "inferred_type": "person",
-        "confidence": 0.80,
-        "wiki_summary": "Saoirse is an Irish given name.",
-        "wiki_title": "Saoirse",
-    }
-
-    with patch("mempalace.entity_registry._wikipedia_lookup", return_value=mock_result):
-        result = registry.research("Saoirse", auto_confirm=True)
-    assert result["inferred_type"] == "person"
-
-    # Second call should use cache, not call Wikipedia again
-    with patch(
-        "mempalace.entity_registry._wikipedia_lookup",
-        side_effect=AssertionError("should not be called"),
-    ):
-        cached = registry.research("Saoirse")
-    assert cached["inferred_type"] == "person"
-
-
-def test_confirm_research_adds_to_people(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(mode="personal", people=[], projects=[])
-
-    mock_result = {
-        "inferred_type": "person",
-        "confidence": 0.80,
-        "wiki_summary": "Saoirse is a name",
-        "wiki_title": "Saoirse",
-    }
-    with patch("mempalace.entity_registry._wikipedia_lookup", return_value=mock_result):
-        registry.research("Saoirse", auto_confirm=False)
-
-    registry.confirm_research("Saoirse", entity_type="person", relationship="friend")
-    assert "Saoirse" in registry.people
-    assert registry.people["Saoirse"]["source"] == "wiki"
-
-
-# ── extract_people_from_query ───────────────────────────────────────────
-
-
-def test_extract_people_from_query(tmp_path):
+def test_iter_known_names_includes_canonical_and_aliases(tmp_path):
     registry = EntityRegistry.load(config_dir=tmp_path)
     registry.seed(
         mode="personal",
         people=[
             {"name": "Riley", "relationship": "daughter", "context": "personal"},
-            {"name": "Devon", "relationship": "friend", "context": "personal"},
+            {"name": "Maxwell", "relationship": "friend", "context": "personal"},
         ],
         projects=[],
+        aliases={"Max": "Maxwell"},
     )
-    found = registry.extract_people_from_query("What did Riley say about the weather?")
-    assert "Riley" in found
-    assert "Devon" not in found
+    names = registry.iter_known_names()
+    # All entries are lowercased so the spellchecker can do case-insensitive
+    # word boundary matching against user text without re-normalizing.
+    assert "riley" in names
+    assert "maxwell" in names
+    assert "max" in names
+    assert all(n == n.lower() for n in names)
 
 
-# ── extract_unknown_candidates ──────────────────────────────────────────
-
-
-def test_extract_unknown_candidates(tmp_path):
+def test_iter_known_names_empty_registry(tmp_path):
     registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(mode="personal", people=[], projects=[])
-    unknowns = registry.extract_unknown_candidates("Saoirse went to the store")
-    assert "Saoirse" in unknowns
-
-
-def test_extract_unknown_candidates_skips_known(tmp_path):
-    registry = EntityRegistry.load(config_dir=tmp_path)
-    registry.seed(
-        mode="personal",
-        people=[{"name": "Riley", "relationship": "daughter", "context": "personal"}],
-        projects=[],
-    )
-    unknowns = registry.extract_unknown_candidates("Riley went to the store")
-    assert "Riley" not in unknowns
+    assert registry.iter_known_names() == set()
 
 
 # ── summary ─────────────────────────────────────────────────────────────

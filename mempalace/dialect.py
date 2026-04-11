@@ -760,8 +760,13 @@ class Dialect:
                 f.write(dialect)
         return dialect
 
-    def compress_all(self, zettel_dir: str, output_path: str = None) -> str:
-        """Compress ALL zettel files into a single AAAK Dialect file."""
+    def compress_all(self, zettel_dir: str, output_path: str = None) -> str:  # pragma: no cover
+        """Compress ALL zettel files into a single AAAK Dialect file.
+
+        Legacy zettel-directory helper retained for the dialect.py CLI
+        entry point. Not on the palace retrieval hot path — MemPalace
+        mines verbatim drawers, not zettel JSON files.
+        """
         all_dialect = []
         for fname in sorted(p.name for p in Path(zettel_dir).iterdir()):
             if fname.endswith(".json"):
@@ -779,7 +784,7 @@ class Dialect:
 
     # === LAYER 1 GENERATION ===
 
-    def generate_layer1(
+    def generate_layer1(  # pragma: no cover
         self,
         zettel_dir: str,
         output_path: str = None,

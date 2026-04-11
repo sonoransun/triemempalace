@@ -4,6 +4,7 @@ MemPalace configuration system.
 Priority: env vars > config file (~/.mempalace/config.json) > defaults
 """
 
+import contextlib
 import json
 import os
 import re
@@ -64,7 +65,11 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
     return value
 
 
-DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
+# Legacy default Chroma collection. The embeddings registry's
+# ``default`` slug maps to this name via ``embeddings.collection_name_for``;
+# new code should never string-interpolate the collection name and should
+# always go through ``palace_io.open_collection``.
+DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 
 # Embedding model defaults. Zero-touch for existing palaces: the
 # properties fall back to these when the config.json keys are missing.
@@ -303,11 +308,10 @@ class MempalaceConfig:
     def init(self):
         """Create config directory and write default config.json if it doesn't exist."""
         self._config_dir.mkdir(parents=True, exist_ok=True)
-        # Restrict directory permissions to owner only (Unix)
-        try:
+        # Restrict directory permissions to owner only (Unix).
+        # Windows doesn't support Unix permissions; chmod is a no-op there.
+        with contextlib.suppress(OSError, NotImplementedError):
             self._config_dir.chmod(0o700)
-        except (OSError, NotImplementedError):
-            pass  # Windows doesn't support Unix permissions
         if not self._config_file.exists():
             default_config = {
                 "palace_path": DEFAULT_PALACE_PATH,
@@ -317,11 +321,8 @@ class MempalaceConfig:
             }
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)
-            # Restrict config file to owner read/write only
-            try:
+            with contextlib.suppress(OSError, NotImplementedError):
                 self._config_file.chmod(0o600)
-            except (OSError, NotImplementedError):
-                pass
         return self._config_file
 
     def save_people_map(self, people_map):

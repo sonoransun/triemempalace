@@ -81,7 +81,7 @@ class TestHandleRequest:
         assert resp["result"]["protocolVersion"] == SUPPORTED_PROTOCOL_VERSIONS[0]
 
     def test_initialize_missing_version_uses_oldest(self):
-        from mempalace.mcp_server import handle_request, SUPPORTED_PROTOCOL_VERSIONS
+        from mempalace.mcp_server import SUPPORTED_PROTOCOL_VERSIONS, handle_request
 
         resp = handle_request({"method": "initialize", "id": 1, "params": {}})
         assert resp["result"]["protocolVersion"] == SUPPORTED_PROTOCOL_VERSIONS[-1]
@@ -479,3 +479,54 @@ class TestDiaryTools:
 
         r = tool_diary_read(agent_name="Nobody")
         assert r["entries"] == []
+
+
+# ── Registry tools (list_models / list_rerankers) ───────────────────
+
+
+class TestRegistryTools:
+    def test_list_models_returns_every_spec(self, monkeypatch, config, kg, palace_path):
+        """tool_list_models must cover every registered embedding spec."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+
+        from mempalace import embeddings
+        from mempalace.mcp_server import tool_list_models
+
+        result = tool_list_models()
+        assert "models" in result
+        assert "default_model" in result
+        assert result["default_model"] == config.default_embedding_model
+        slugs = {m["slug"] for m in result["models"]}
+        expected = {s.slug for s in embeddings.list_specs()}
+        assert slugs == expected
+        # Every entry has the shape the MCP client expects.
+        for m in result["models"]:
+            assert set(m.keys()) >= {
+                "slug",
+                "display_name",
+                "backend",
+                "model_id",
+                "dimension",
+                "extras_required",
+                "installed",
+                "enabled",
+                "is_default",
+                "drawers",
+            }
+
+    def test_list_rerankers_returns_every_spec(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import rerank as _rerank_module
+        from mempalace.mcp_server import tool_list_rerankers
+
+        result = tool_list_rerankers()
+        assert "rerankers" in result
+        slugs = {r["slug"] for r in result["rerankers"]}
+        expected = {s.slug for s in _rerank_module.list_reranker_specs()}
+        assert slugs == expected
+        for spec in result["rerankers"]:
+            assert "installed" in spec
+            assert "supports_pruning" in spec
+            assert "extras_required" in spec

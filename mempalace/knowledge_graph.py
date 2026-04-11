@@ -35,6 +35,7 @@ Usage:
     kg.invalidate("Max", "has_issue", "sports_injury", ended="2026-02-15")
 """
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -98,6 +99,16 @@ class KnowledgeGraph:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+
+    def __del__(self):
+        # Defensive: pytest's filterwarnings=error promotes the
+        # ResourceWarning that fires when sqlite3 garbage-collects an
+        # open connection into a hard test failure. Closing on __del__
+        # is best-effort and the explicit ``close()`` is still preferred.
+        # The broad suppress is intentional — __del__ is a finalizer and
+        # must never raise, regardless of the underlying error.
+        with contextlib.suppress(Exception):
+            self.close()
 
     def _entity_id(self, name: str) -> str:
         return name.lower().replace(" ", "_").replace("'", "")
@@ -190,7 +201,6 @@ class KnowledgeGraph:
                 (new_conf, merged_sources, existing_id),
             )
             conn.commit()
-            conn.close()
             return existing_id
 
         triple_hash_input = f"{valid_from}{datetime.now(UTC).isoformat()}".encode()
@@ -217,33 +227,6 @@ class KnowledgeGraph:
             ),
         )
         conn.commit()
-        conn.close()
-            # Check for existing identical triple
-            existing = conn.execute(
-                "SELECT id FROM triples WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
-                (sub_id, pred, obj_id),
-            ).fetchone()
-
-            if existing:
-                return existing["id"]  # Already exists and still valid
-
-            triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
-
-            conn.execute(
-                """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    triple_id,
-                    sub_id,
-                    pred,
-                    obj_id,
-                    valid_from,
-                    valid_to,
-                    confidence,
-                    source_closet,
-                    source_file,
-                ),
-            )
         return triple_id
 
     @staticmethod

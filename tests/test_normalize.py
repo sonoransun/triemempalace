@@ -1,6 +1,8 @@
 import json
 from unittest.mock import patch
 
+import pytest
+
 from mempalace.normalize import (
     _extract_content,
     _messages_to_transcript,
@@ -500,10 +502,9 @@ def test_messages_to_transcript_assistant_first():
 
 
 def test_normalize_rejects_large_file():
-    """Files over 500 MB should raise IOError before reading."""
-    with patch("mempalace.normalize.os.path.getsize", return_value=600 * 1024 * 1024):
-        try:
-            normalize("/fake/huge_file.txt")
-            assert False, "Should have raised IOError"
-        except IOError as e:
-            assert "too large" in str(e).lower()
+    """Files over 500 MB should raise OSError before reading."""
+    with (
+        patch("mempalace.normalize.os.path.getsize", return_value=600 * 1024 * 1024),
+        pytest.raises(OSError, match="too large"),
+    ):
+        normalize("/fake/huge_file.txt")

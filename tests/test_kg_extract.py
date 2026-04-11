@@ -404,3 +404,177 @@ class TestKGDedupeAndVoting:
         row = conn.execute("SELECT source_closet FROM triples").fetchone()
         conn.close()
         assert row[0] is None
+
+
+# ── extract_from_palace (engine behind CLI + --extract-kg flag) ─────
+
+
+class TestExtractFromPalace:
+    """Covers the palace walker that wires the extractors to KG writes."""
+
+    def test_cannot_open_collection_reports_error(self, tmp_path, monkeypatch):
+        """Open failure is logged and reported as a 1-error stats envelope."""
+        from mempalace.kg_extract import extract_from_palace
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("missing palace")
+
+        monkeypatch.setattr("mempalace.palace_io.open_collection", _boom)
+        stats = extract_from_palace(str(tmp_path / "nowhere"), mode="heuristic")
+        assert stats["drawers_scanned"] == 0
+        assert stats["triples_added"] == 0
+        assert stats["errors"] == 1
+        assert "missing palace" in stats["error"]
+
+    def test_heuristic_walks_single_batch(self, tmp_path, monkeypatch):
+        """A single-page collection yields stats consistent with extractor output."""
+        from mempalace import kg_extract
+        from mempalace.kg_extract import Triple, extract_from_palace
+
+        fake_col = _FakeCollection(
+            ids=["d1", "d2"],
+            documents=[
+                "Alice works at Acme.",
+                "Bob lives in Boston.",
+            ],
+        )
+        monkeypatch.setattr("mempalace.palace_io.open_collection", lambda *a, **k: fake_col)
+
+        class _FakeExtractor:
+            def extract(self, text, *, source_drawer_id=None):
+                return [Triple("X", "rel", "Y", confidence=0.6)]
+
+        monkeypatch.setattr(kg_extract, "get_extractor", lambda *a, **k: _FakeExtractor())
+
+        fake_kg = _FakeKG()
+        monkeypatch.setattr(
+            "mempalace.knowledge_graph.KnowledgeGraph", lambda *a, **k: fake_kg
+        )
+
+        stats = extract_from_palace(str(tmp_path / "palace"), mode="heuristic")
+        assert stats["drawers_scanned"] == 2
+        assert stats["triples_added"] == 2
+        assert stats["errors"] == 0
+        assert fake_kg.calls == 2
+
+    def test_extractor_failure_counts_as_error(self, tmp_path, monkeypatch):
+        """extractor.extract() exceptions bump the error count but don't halt the walk."""
+        from mempalace import kg_extract
+        from mempalace.kg_extract import extract_from_palace
+
+        fake_col = _FakeCollection(ids=["d1", "d2"], documents=["text 1", "text 2"])
+        monkeypatch.setattr("mempalace.palace_io.open_collection", lambda *a, **k: fake_col)
+
+        class _CrashingExtractor:
+            def extract(self, text, *, source_drawer_id=None):
+                raise ValueError("boom")
+
+        monkeypatch.setattr(kg_extract, "get_extractor", lambda *a, **k: _CrashingExtractor())
+        monkeypatch.setattr(
+            "mempalace.knowledge_graph.KnowledgeGraph", lambda *a, **k: _FakeKG()
+        )
+
+        stats = extract_from_palace(str(tmp_path / "palace"), mode="heuristic")
+        assert stats["drawers_scanned"] == 2
+        assert stats["triples_added"] == 0
+        assert stats["errors"] == 2
+
+    def test_kg_add_triple_failure_counts_as_error(self, tmp_path, monkeypatch):
+        """A failing ``kg.add_triple`` increments the error counter but keeps going."""
+        from mempalace import kg_extract
+        from mempalace.kg_extract import Triple, extract_from_palace
+
+        fake_col = _FakeCollection(ids=["d1"], documents=["text"])
+        monkeypatch.setattr("mempalace.palace_io.open_collection", lambda *a, **k: fake_col)
+
+        class _FakeExtractor:
+            def extract(self, text, *, source_drawer_id=None):
+                return [Triple("X", "rel", "Y", confidence=0.6)]
+
+        monkeypatch.setattr(kg_extract, "get_extractor", lambda *a, **k: _FakeExtractor())
+
+        class _CrashingKG:
+            def add_triple(self, *args, **kwargs):
+                raise RuntimeError("db full")
+
+        monkeypatch.setattr(
+            "mempalace.knowledge_graph.KnowledgeGraph", lambda *a, **k: _CrashingKG()
+        )
+
+        stats = extract_from_palace(str(tmp_path / "palace"), mode="heuristic")
+        assert stats["errors"] == 1
+        assert stats["triples_added"] == 0
+
+    def test_empty_collection_returns_zero(self, tmp_path, monkeypatch):
+        """A collection with zero drawers returns a zero-stats envelope."""
+        from mempalace import kg_extract
+        from mempalace.kg_extract import extract_from_palace
+
+        fake_col = _FakeCollection(ids=[], documents=[])
+        monkeypatch.setattr("mempalace.palace_io.open_collection", lambda *a, **k: fake_col)
+        monkeypatch.setattr(kg_extract, "get_extractor", lambda *a, **k: _NoopExtractor())
+        monkeypatch.setattr(
+            "mempalace.knowledge_graph.KnowledgeGraph", lambda *a, **k: _FakeKG()
+        )
+
+        stats = extract_from_palace(str(tmp_path / "palace"), mode="heuristic")
+        assert stats["drawers_scanned"] == 0
+        assert stats["triples_added"] == 0
+
+    def test_batch_fetch_failure_breaks_loop(self, tmp_path, monkeypatch):
+        """An exception from ``collection.get`` bumps errors and breaks the page loop."""
+        from mempalace import kg_extract
+        from mempalace.kg_extract import extract_from_palace
+
+        class _CrashingCollection:
+            def count(self):
+                return 10
+
+            def get(self, **kwargs):
+                raise RuntimeError("io fail")
+
+        monkeypatch.setattr(
+            "mempalace.palace_io.open_collection", lambda *a, **k: _CrashingCollection()
+        )
+        monkeypatch.setattr(kg_extract, "get_extractor", lambda *a, **k: _NoopExtractor())
+        monkeypatch.setattr(
+            "mempalace.knowledge_graph.KnowledgeGraph", lambda *a, **k: _FakeKG()
+        )
+
+        stats = extract_from_palace(str(tmp_path / "palace"), mode="heuristic")
+        assert stats["errors"] == 1
+        assert stats["drawers_scanned"] == 0
+
+
+# Helpers for the extract_from_palace tests above.
+
+
+class _FakeCollection:
+    def __init__(self, ids: list, documents: list):
+        self._ids = list(ids)
+        self._documents = list(documents)
+        self._metadatas = [{} for _ in ids]
+
+    def count(self) -> int:
+        return len(self._ids)
+
+    def get(self, *, include=None, limit=500, offset=0):
+        end = offset + limit
+        return {
+            "ids": self._ids[offset:end],
+            "documents": self._documents[offset:end],
+            "metadatas": self._metadatas[offset:end],
+        }
+
+
+class _FakeKG:
+    def __init__(self):
+        self.calls = 0
+
+    def add_triple(self, *args, **kwargs):
+        self.calls += 1
+
+
+class _NoopExtractor:
+    def extract(self, text, *, source_drawer_id=None):
+        return []

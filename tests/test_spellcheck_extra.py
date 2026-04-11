@@ -11,12 +11,7 @@ from mempalace.spellcheck import (
 class TestLoadKnownNames:
     def test_returns_names_from_registry(self):
         mock_reg = MagicMock()
-        mock_reg._data = {
-            "entities": {
-                "e1": {"canonical": "Alice", "aliases": ["ali"]},
-                "e2": {"canonical": "Bob", "aliases": []},
-            }
-        }
+        mock_reg.iter_known_names.return_value = {"alice", "ali", "bob"}
         with patch("mempalace.entity_registry.EntityRegistry") as MockER:
             MockER.load.return_value = mock_reg
             names = _load_known_names()
@@ -25,9 +20,12 @@ class TestLoadKnownNames:
             assert "bob" in names
 
     def test_returns_empty_on_exception(self):
+        # _load_known_names narrows to (OSError, ImportError) — use OSError
+        # since it's the documented failure surface for the registry's
+        # JSON-on-disk load path.
         with patch(
             "mempalace.entity_registry.EntityRegistry.load",
-            side_effect=Exception("no registry"),
+            side_effect=OSError("no registry"),
         ):
             names = _load_known_names()
             assert names == set()

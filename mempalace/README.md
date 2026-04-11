@@ -18,7 +18,7 @@ The Python package that powers MemPalace. All modules, all logic.
 | `palace_graph.py` | Room-based navigation graph — BFS traversal, tunnel detection across wings |
 | `mcp_server.py` | MCP server — 19 tools, AAAK auto-teach, Palace Protocol, agent diary |
 | `onboarding.py` | Guided first-run setup — asks about people/projects, generates AAAK bootstrap + wing config |
-| `entity_registry.py` | Entity code registry — maps names to AAAK codes, handles ambiguous names |
+| `entity_registry.py` | Persistent personal entity registry — stores user-confirmed names, projects, aliases, and a known-names set used by the spellchecker |
 | `entity_detector.py` | Auto-detect people and projects from file content |
 | `general_extractor.py` | Classifies text into 5 memory types (decision, preference, milestone, problem, emotional) |
 | `room_detector_local.py` | Maps folders to room names using 70+ patterns — no API |

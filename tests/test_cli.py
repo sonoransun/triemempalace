@@ -12,11 +12,15 @@ from mempalace.cli import (
     cmd_hook,
     cmd_init,
     cmd_instructions,
+    cmd_kg_extract,
     cmd_mine,
+    cmd_models,
     cmd_repair,
+    cmd_rerankers,
     cmd_search,
     cmd_split,
     cmd_status,
+    cmd_trie_repair,
     cmd_wakeup,
     main,
 )
@@ -455,105 +459,103 @@ def test_main_compress_dispatches():
 # ── cmd_repair ─────────────────────────────────────────────────────────
 
 
+def _config_with_default_models(palace_path: str) -> MagicMock:
+    """Build a MempalaceConfig stub that exposes the multi-model fields cmd_repair needs."""
+    cfg = MagicMock()
+    cfg.palace_path = palace_path
+    cfg.enabled_embedding_models = ["default"]
+    cfg.default_embedding_model = "default"
+    return cfg
+
+
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_repair_no_palace(mock_config_cls, tmp_path, capsys):
-    mock_config_cls.return_value.palace_path = str(tmp_path / "nonexistent")
-    args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
+    mock_config_cls.return_value = _config_with_default_models(str(tmp_path / "nonexistent"))
+    cmd_repair(argparse.Namespace(palace=None))
     out = capsys.readouterr().out
     assert "No palace found" in out
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
+def test_cmd_repair_error_reading(mock_config_cls, mock_open, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
-    mock_client = MagicMock()
-    mock_client.get_collection.side_effect = Exception("corrupt db")
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
+    mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
+    mock_open.side_effect = ValueError("corrupt db")
+    cmd_repair(argparse.Namespace(palace=None))
     out = capsys.readouterr().out
-    assert "Error reading palace" in out
+    assert "[default] skipped" in out
+    assert "Nothing to repair" in out
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys):
+def test_cmd_repair_zero_drawers(mock_config_cls, mock_open, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
+    mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
     mock_col = MagicMock()
     mock_col.count.return_value = 0
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
+    mock_open.return_value = mock_col
+    cmd_repair(argparse.Namespace(palace=None))
     out = capsys.readouterr().out
     assert "Nothing to repair" in out
 
 
+@patch("mempalace.palace_io.drop_collection_cache")
+@patch("mempalace.palace_io.delete_collection")
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
+def test_cmd_repair_success(
+    mock_config_cls, mock_open, mock_delete, mock_drop_cache, tmp_path, capsys
+):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
-    mock_col = MagicMock()
-    mock_col.count.return_value = 2
-    mock_col.get.return_value = {
+    mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
+
+    old_col = MagicMock()
+    old_col.count.return_value = 2
+    old_col.get.return_value = {
         "ids": ["id1", "id2"],
         "documents": ["doc1", "doc2"],
         "metadatas": [{"wing": "a"}, {"wing": "b"}],
     }
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_new_col = MagicMock()
-    mock_client.create_collection.return_value = mock_new_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
+    new_col = MagicMock()
+    mock_open.side_effect = [old_col, new_col]
+
+    cmd_repair(argparse.Namespace(palace=None))
     out = capsys.readouterr().out
+
     assert "Repair complete" in out
     assert "2 drawers rebuilt" in out
+    mock_delete.assert_called_once()
+    mock_drop_cache.assert_called_once()
+    new_col.add.assert_called_once()
 
 
 # ── cmd_compress ───────────────────────────────────────────────────────
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_no_palace(mock_config_cls, capsys):
+def test_cmd_compress_no_palace(mock_config_cls, mock_open, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     args = argparse.Namespace(palace=None, wing=None, dry_run=False, config=None)
-    mock_chromadb = MagicMock()
-    mock_chromadb.PersistentClient.side_effect = Exception("no palace")
-    with (
-        patch.dict("sys.modules", {"chromadb": mock_chromadb}),
-        pytest.raises(SystemExit),
-    ):
+    mock_open.side_effect = ValueError("no palace")
+    with pytest.raises(SystemExit):
         cmd_compress(args)
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_no_drawers(mock_config_cls, capsys):
+def test_cmd_compress_no_drawers(mock_config_cls, mock_open, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     args = argparse.Namespace(palace=None, wing="mywing", dry_run=False, config=None)
-    mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_compress(args)
+    mock_open.return_value = mock_col
+    cmd_compress(args)
     out = capsys.readouterr().out
     assert "No drawers found" in out
 
@@ -567,11 +569,11 @@ def _make_mock_dialect_module(dialect_instance):
     return mock_mod
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_dry_run(mock_config_cls, capsys):
+def test_cmd_compress_dry_run(mock_config_cls, mock_open, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     args = argparse.Namespace(palace=None, wing=None, dry_run=True, config=None)
-    mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.side_effect = [
         {
@@ -581,9 +583,7 @@ def test_cmd_compress_dry_run(mock_config_cls, capsys):
         },
         {"documents": [], "metadatas": [], "ids": []},
     ]
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
+    mock_open.return_value = mock_col
 
     mock_dialect = MagicMock()
     mock_dialect.compress.return_value = "compressed"
@@ -596,55 +596,41 @@ def test_cmd_compress_dry_run(mock_config_cls, capsys):
     }
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
-    with patch.dict(
-        "sys.modules",
-        {
-            "chromadb": mock_chromadb,
-            "mempalace.dialect": mock_dialect_mod,
-        },
-    ):
+    with patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}):
         cmd_compress(args)
     out = capsys.readouterr().out
     assert "dry run" in out.lower()
     assert "Compressing" in out
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_with_config(mock_config_cls, tmp_path, capsys):
+def test_cmd_compress_with_config(mock_config_cls, mock_open, tmp_path, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     config_file = tmp_path / "entities.json"
     config_file.write_text('{"people": [], "projects": []}')
     args = argparse.Namespace(palace=None, wing=None, dry_run=True, config=str(config_file))
-    mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
+    mock_open.return_value = mock_col
 
     mock_dialect = MagicMock()
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
-    with patch.dict(
-        "sys.modules",
-        {
-            "chromadb": mock_chromadb,
-            "mempalace.dialect": mock_dialect_mod,
-        },
-    ):
+    with patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}):
         cmd_compress(args)
     out = capsys.readouterr().out
     assert "Loaded entity config" in out
 
 
+@patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_stores_results(mock_config_cls, capsys):
+def test_cmd_compress_stores_results(mock_config_cls, mock_open, capsys):
     """Non-dry-run compress stores to mempalace_compressed collection."""
     mock_config_cls.return_value.palace_path = "/fake/palace"
     args = argparse.Namespace(palace=None, wing=None, dry_run=False, config=None)
-    mock_chromadb = MagicMock()
-    mock_col = MagicMock()
-    mock_col.get.side_effect = [
+    read_col = MagicMock()
+    read_col.get.side_effect = [
         {
             "documents": ["text"],
             "metadatas": [{"wing": "w", "room": "r", "source_file": "f.txt"}],
@@ -652,11 +638,10 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
         },
         {"documents": [], "metadatas": [], "ids": []},
     ]
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_comp_col = MagicMock()
-    mock_client.get_or_create_collection.return_value = mock_comp_col
-    mock_chromadb.PersistentClient.return_value = mock_client
+    comp_col = MagicMock()
+    # cmd_compress calls open_collection twice: once for the read side
+    # (default model) and once for the compressed sidecar collection.
+    mock_open.side_effect = [read_col, comp_col]
 
     mock_dialect = MagicMock()
     mock_dialect.compress.return_value = "compressed"
@@ -669,27 +654,432 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     }
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
-    with patch.dict(
-        "sys.modules",
-        {
-            "chromadb": mock_chromadb,
-            "mempalace.dialect": mock_dialect_mod,
-        },
-    ):
+    with patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}):
         cmd_compress(args)
     out = capsys.readouterr().out
     assert "Stored" in out
-    mock_comp_col.upsert.assert_called_once()
+    comp_col.upsert.assert_called_once()
+    # The second open_collection call must use the compressed override.
+    second_call = mock_open.call_args_list[1]
+    assert second_call.kwargs.get("collection_name_override") == "mempalace_compressed"
 
 
-def test_cmd_repair_trailing_slash_does_not_recurse():
+def test_cmd_repair_trailing_slash_does_not_recurse(tmp_path):
     """Repair with trailing slash should put backup outside palace dir (#395)."""
     import os
 
-    args = argparse.Namespace(palace="/tmp/fake_palace/")
-    with patch("mempalace.cli.os.path.isdir", return_value=False):
-        cmd_repair(args)
-    # Verify the rstrip logic: palace_path should not end with separator
-    palace_path = os.path.expanduser(args.palace).rstrip(os.sep)
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    palace_arg = str(palace_dir) + "/"
+    args = argparse.Namespace(palace=palace_arg)
+    with patch("mempalace.cli.MempalaceConfig") as mock_config_cls:
+        mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
+        with patch("mempalace.palace_io.open_collection") as mock_open:
+            empty = MagicMock()
+            empty.count.return_value = 0
+            mock_open.return_value = empty
+            cmd_repair(args)
+    palace_path = os.path.expanduser(palace_arg).rstrip(os.sep)
     backup_path = palace_path + ".backup"
     assert not backup_path.startswith(palace_path + os.sep)
+
+
+# ── cmd_trie_repair ───────────────────────────────────────────────────
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_trie_repair_no_palace(mock_config_cls, tmp_path, capsys):
+    mock_config_cls.return_value.palace_path = str(tmp_path / "nonexistent")
+    cmd_trie_repair(argparse.Namespace(palace=None))
+    out = capsys.readouterr().out
+    assert "No palace found" in out
+
+
+@patch("mempalace.palace_io.open_collection")
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_trie_repair_open_failure(mock_config_cls, mock_open, tmp_path, capsys):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    mock_config_cls.return_value.palace_path = str(palace_dir)
+    mock_open.side_effect = ValueError("bad palace")
+    cmd_trie_repair(argparse.Namespace(palace=None))
+    out = capsys.readouterr().out
+    assert "Could not open palace" in out
+
+
+@patch("mempalace.palace_io.open_collection")
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_trie_repair_success(mock_config_cls, mock_open, tmp_path, capsys):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    mock_config_cls.return_value.palace_path = str(palace_dir)
+
+    mock_col = MagicMock()
+    mock_col.count.return_value = 5
+    mock_open.return_value = mock_col
+
+    fake_trie = MagicMock()
+    fake_trie.rebuild_from_collection.return_value = 17
+    fake_trie.stats.return_value = {
+        "unique_tokens": 4,
+        "unique_drawers": 5,
+        "db_path": str(palace_dir / "trie_index.lmdb"),
+    }
+    with patch("mempalace.trie_index.TrieIndex", return_value=fake_trie):
+        cmd_trie_repair(argparse.Namespace(palace=None))
+    out = capsys.readouterr().out
+    assert "Postings filed" in out
+    assert "17" in out
+
+
+# ── cmd_models ────────────────────────────────────────────────────────
+
+
+def _models_config(default="default", enabled=("default",)) -> MagicMock:
+    cfg = MagicMock()
+    cfg.palace_path = "/fake/palace"
+    cfg.default_embedding_model = default
+    cfg.enabled_embedding_models = list(enabled)
+    return cfg
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_list(mock_config_cls, capsys):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="list")
+    with patch("mempalace.palace_io.open_collection") as mock_open:
+        mock_col = MagicMock()
+        mock_col.count.return_value = 3
+        mock_open.return_value = mock_col
+        cmd_models(args)
+    out = capsys.readouterr().out
+    assert "SLUG" in out
+    assert "default model:" in out
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_list_open_failure_shows_zero(mock_config_cls, capsys):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="list")
+    with patch("mempalace.palace_io.open_collection", side_effect=RuntimeError("boom")):
+        cmd_models(args)
+    out = capsys.readouterr().out
+    assert "default model:" in out
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_list_default_action(mock_config_cls, capsys):
+    """Passing models_action=None defaults to 'list' behavior."""
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action=None)
+    with patch("mempalace.palace_io.open_collection") as mock_open:
+        mock_open.return_value = MagicMock(count=lambda: 0)
+        cmd_models(args)
+    out = capsys.readouterr().out
+    assert "SLUG" in out
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_missing_slug_exits(mock_config_cls):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="enable", slug=None)
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_models(args)
+    assert exc_info.value.code == 2
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_unknown_slug_exits(mock_config_cls, capsys):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="enable", slug="not-a-real-slug")
+    with patch(
+        "mempalace.embeddings.get_spec", side_effect=KeyError("unknown slug not-a-real-slug")
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_models(args)
+    assert exc_info.value.code == 2
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_enable(mock_config_cls, capsys):
+    cfg = _models_config()
+    mock_config_cls.return_value = cfg
+    args = argparse.Namespace(models_action="enable", slug="fake")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(slug="fake", backend="fake", extras_required=())
+        cmd_models(args)
+    cfg.save_embedding_config.assert_called_once()
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_disable_rejects_default(mock_config_cls, capsys):
+    cfg = _models_config()
+    mock_config_cls.return_value = cfg
+    args = argparse.Namespace(models_action="disable", slug="default")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(slug="default", backend="chroma-default", extras_required=())
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_models(args)
+    assert exc_info.value.code == 2
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_disable_other(mock_config_cls, capsys):
+    cfg = _models_config(enabled=("default", "fake"))
+    mock_config_cls.return_value = cfg
+    args = argparse.Namespace(models_action="disable", slug="fake")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(slug="fake", backend="fake", extras_required=())
+        cmd_models(args)
+    cfg.save_embedding_config.assert_called_once()
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_set_default(mock_config_cls, capsys):
+    cfg = _models_config()
+    mock_config_cls.return_value = cfg
+    args = argparse.Namespace(models_action="set-default", slug="fake")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(slug="fake", backend="fake", extras_required=())
+        cmd_models(args)
+    cfg.save_embedding_config.assert_called_once()
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_download_missing_extras(mock_config_cls, capsys):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="download", slug="fake")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(
+            slug="fake", backend="fastembed", extras_required=("fastembed",), model_id="fake/v1"
+        )
+        with patch("mempalace.embeddings.is_installed", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_models(args)
+    assert exc_info.value.code == 2
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_download_default_slug(mock_config_cls, capsys):
+    """The 'default' slug returns None from load_embedding_function — nothing to download."""
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="download", slug="default")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(
+            slug="default",
+            backend="chroma-default",
+            extras_required=(),
+            model_id="all-MiniLM-L6-v2",
+        )
+        with patch("mempalace.embeddings.is_installed", return_value=True):
+            with patch("mempalace.embeddings.load_embedding_function", return_value=None):
+                cmd_models(args)
+    out = capsys.readouterr().out
+    assert "chroma default" in out
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_download_failure_exits(mock_config_cls, capsys):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="download", slug="fake")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(
+            slug="fake", backend="fake", extras_required=(), model_id="fake/v1"
+        )
+        with patch("mempalace.embeddings.is_installed", return_value=True):
+            with patch(
+                "mempalace.embeddings.load_embedding_function",
+                side_effect=RuntimeError("disk full"),
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    cmd_models(args)
+    assert exc_info.value.code == 1
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_models_unknown_action_exits(mock_config_cls, capsys):
+    mock_config_cls.return_value = _models_config()
+    args = argparse.Namespace(models_action="weird", slug="fake")
+    with patch("mempalace.embeddings.get_spec") as mock_spec:
+        mock_spec.return_value = MagicMock(slug="fake", backend="fake", extras_required=())
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_models(args)
+    assert exc_info.value.code == 2
+
+
+# ── cmd_rerankers ─────────────────────────────────────────────────────
+
+
+def test_cmd_rerankers_list(capsys):
+    args = argparse.Namespace(rerankers_action="list")
+    cmd_rerankers(args)
+    out = capsys.readouterr().out
+    assert "SLUG" in out
+    assert "PRUNE" in out
+
+
+def test_cmd_rerankers_default_action(capsys):
+    args = argparse.Namespace(rerankers_action=None)
+    cmd_rerankers(args)
+    out = capsys.readouterr().out
+    assert "SLUG" in out
+
+
+def test_cmd_rerankers_unknown_action(capsys):
+    args = argparse.Namespace(rerankers_action="weird")
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_rerankers(args)
+    assert exc_info.value.code == 2
+    out = capsys.readouterr().out
+    assert "unknown rerankers action" in out
+
+
+# ── cmd_kg_extract ────────────────────────────────────────────────────
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_kg_extract_no_palace(mock_config_cls, tmp_path):
+    mock_config_cls.return_value.palace_path = str(tmp_path / "nonexistent")
+    args = argparse.Namespace(palace=None, mode="heuristic", model="llama3.1:8b")
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_kg_extract(args)
+    assert exc_info.value.code == 1
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_kg_extract_heuristic(mock_config_cls, tmp_path, capsys):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    mock_config_cls.return_value.palace_path = str(palace_dir)
+    args = argparse.Namespace(palace=None, mode="heuristic", model="llama3.1:8b")
+    with patch("mempalace.kg_extract.extract_from_palace") as mock_extract:
+        mock_extract.return_value = {
+            "drawers_scanned": 10,
+            "triples_added": 3,
+            "errors": 0,
+        }
+        cmd_kg_extract(args)
+    out = capsys.readouterr().out
+    assert "Drawers scanned:  10" in out
+    assert "Triples added:    3" in out
+
+
+# ── cmd_mine with --extract-kg flag ─────────────────────────────────
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_rejects_model_all(mock_config_cls):
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/src",
+        palace=None,
+        mode="projects",
+        wing=None,
+        agent="mempalace",
+        limit=0,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="exchange",
+        model="all",
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_mine(args)
+    assert exc_info.value.code == 2
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_with_extract_kg(mock_config_cls, capsys):
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/src",
+        palace=None,
+        mode="projects",
+        wing=None,
+        agent="mempalace",
+        limit=0,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="exchange",
+        model=None,
+        extract_kg=True,
+        kg_extract_mode="heuristic",
+        kg_extract_model="llama3.1:8b",
+    )
+    with patch("mempalace.miner.mine"):
+        with patch("mempalace.kg_extract.extract_from_palace") as mock_extract:
+            mock_extract.return_value = {"drawers_scanned": 2, "triples_added": 5, "errors": 0}
+            cmd_mine(args)
+    out = capsys.readouterr().out
+    assert "Running KG extraction" in out
+    assert "added 5 triples" in out
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_extract_kg_failure_degrades(mock_config_cls, capsys):
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/src",
+        palace=None,
+        mode="projects",
+        wing=None,
+        agent="mempalace",
+        limit=0,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="exchange",
+        model=None,
+        extract_kg=True,
+        kg_extract_mode="heuristic",
+        kg_extract_model="llama3.1:8b",
+    )
+    with patch("mempalace.miner.mine"):
+        with patch("mempalace.kg_extract.extract_from_palace", side_effect=RuntimeError("oops")):
+            cmd_mine(args)  # must not raise
+    out = capsys.readouterr().out
+    assert "KG extraction skipped" in out
+
+
+# ── cmd_search keyword/keyword_prefix conflict + warm_trie ────────────
+
+
+def test_cmd_search_rejects_keyword_mix():
+    args = _search_args(keyword=["a"], keyword_prefix=["b"])
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_search(args)
+    assert exc_info.value.code == 2
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_search_warm_trie_on_missing_dir(mock_config_cls, tmp_path, capsys):
+    """warm_trie=True on a missing trie dir just falls through silently."""
+    mock_config_cls.return_value.palace_path = str(tmp_path / "nonexistent")
+    args = _search_args(warm_trie=True)
+    with patch("mempalace.searcher.search"):
+        cmd_search(args)
+
+
+# ── cmd_status with trie index ────────────────────────────────────────
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_status_with_existing_trie(mock_config_cls, tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    trie_dir = palace_dir / "trie_index.lmdb"
+    trie_dir.mkdir()
+    mock_config_cls.return_value.palace_path = str(palace_dir)
+    args = argparse.Namespace(palace=None)
+    with patch("mempalace.miner.status"):
+        with patch("mempalace.trie_index.TrieIndex") as mock_trie_cls:
+            mock_trie = MagicMock()
+            mock_trie.stats.return_value = {
+                "unique_tokens": 10,
+                "unique_drawers": 4,
+                "postings": 20,
+                "db_path": str(trie_dir),
+            }
+            mock_trie_cls.return_value = mock_trie
+            cmd_status(args)

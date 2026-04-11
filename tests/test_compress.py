@@ -6,8 +6,6 @@ weights, no network. The compression pipeline is a pure function
 over token sets so everything is deterministic and fast.
 """
 
-from __future__ import annotations
-
 from mempalace.compress import (
     MODES,
     compress_results,

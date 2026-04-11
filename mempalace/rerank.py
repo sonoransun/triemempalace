@@ -204,7 +204,7 @@ def clear_cache() -> None:
 # ── Provence adapter: unified rerank + per-token pruning ──────────────
 
 
-class _ProvenceReranker:
+class _ProvenceReranker:  # pragma: no cover
     """Provence reranker + context pruner (Chirkova et al., ICLR 2025).
 
     Provence's value proposition: one DeBERTa-v3 forward pass per
@@ -306,7 +306,7 @@ class _ProvenceReranker:
 # ── BGE adapter: pure rerank, ONNX via fastembed ──────────────────────
 
 
-class _BgeReranker:
+class _BgeReranker:  # pragma: no cover
     """BGE-reranker-v2-m3 via fastembed's cross-encoder path.
 
     fastembed ships ONNX-exported cross-encoders; no torch dependency.

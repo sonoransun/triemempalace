@@ -17,14 +17,12 @@ from pathlib import Path
 
 import chromadb.errors
 
-from .miner import file_already_mined
+from .miner import SKIP_DIRS, file_already_mined
 from .normalize import normalize
 from .palace_io import open_collection
 from .trie_index import TrieIndex, trie_db_path
 
 logger = logging.getLogger("mempalace.convo_miner")
-from .normalize import normalize
-from .palace import SKIP_DIRS, get_collection, file_already_mined
 
 
 # File types that might contain conversations
@@ -207,7 +205,6 @@ def detect_convo_room(content: str) -> str:
     if scores:
         return max(scores, key=scores.get)
     return "general"
-
 
 
 # =============================================================================

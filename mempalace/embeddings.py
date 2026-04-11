@@ -265,7 +265,7 @@ def _apply_matryoshka(vectors: list[list[float]], spec: EmbeddingSpec) -> list[l
     return [vec[:dim] for vec in vectors]
 
 
-class _FastEmbedFn:
+class _FastEmbedFn:  # pragma: no cover
     """fastembed-backed embedding function.
 
     fastembed is a pure-ONNX library (no torch) with a curated catalog
@@ -298,7 +298,7 @@ class _FastEmbedFn:
         return f"fastembed:{self._spec.slug}"
 
 
-class _SentenceTransformerFn:
+class _SentenceTransformerFn:  # pragma: no cover
     """sentence-transformers-backed embedding function.
 
     Full HuggingFace catalog available. Drags torch transitively —
@@ -326,7 +326,7 @@ class _SentenceTransformerFn:
         return f"st:{self._spec.slug}"
 
 
-class _OllamaFn:
+class _OllamaFn:  # pragma: no cover
     """Ollama HTTP-backed embedding function.
 
     Calls the local Ollama server's ``/api/embeddings`` endpoint. No

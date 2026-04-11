@@ -54,6 +54,14 @@ def _reset_mcp_cache():
             # _collection_cache is now a per-model dict (not a single value)
             mcp_server._collection_cache = {}
             mcp_server._trie_cache = None
+            # Close the module-level KnowledgeGraph singleton's sqlite
+            # connection so a leaked test fixture doesn't trigger
+            # ``ResourceWarning: unclosed database`` (which pyproject's
+            # filterwarnings=error promotes into a hard test failure).
+            kg = getattr(mcp_server, "_kg", None)
+            if kg is not None:
+                with contextlib.suppress(Exception):
+                    kg.close()
         except (ImportError, AttributeError):
             pass
         try:
@@ -205,7 +213,10 @@ def seeded_collection(collection):
 def kg(tmp_dir):
     """An isolated KnowledgeGraph using a temp SQLite file."""
     db_path = os.path.join(tmp_dir, "test_kg.sqlite3")
-    return KnowledgeGraph(db_path=db_path)
+    instance = KnowledgeGraph(db_path=db_path)
+    yield instance
+    with contextlib.suppress(Exception):
+        instance.close()
 
 
 @pytest.fixture

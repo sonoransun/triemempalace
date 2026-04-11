@@ -417,3 +417,71 @@ def test_run_hook_invalid_json(tmp_path):
             with patch("mempalace.hooks_cli._output") as mock_output:
                 run_hook("session-start", "claude-code")
     mock_output.assert_called_once_with({})
+
+
+# --- codex harness parity ---
+
+
+def test_parse_harness_input_codex():
+    """The codex harness is accepted and parsed symmetrically with claude-code."""
+    result = _parse_harness_input(
+        {"session_id": "codex-session", "stop_hook_active": False, "transcript_path": "/tmp/x"},
+        "codex",
+    )
+    assert result["session_id"] == "codex-session"
+    assert result["stop_hook_active"] is False
+    assert result["transcript_path"] == "/tmp/x"
+
+
+def test_session_start_codex(tmp_path):
+    """session-start passes through under the codex harness."""
+    result = _capture_hook_output(
+        hook_session_start,
+        {"session_id": "codex-session"},
+        harness="codex",
+        state_dir=tmp_path,
+    )
+    assert result == {}
+
+
+def test_stop_codex_blocks_at_interval(tmp_path):
+    """The stop hook blocks identically whether the harness is claude-code or codex."""
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    result = _capture_hook_output(
+        hook_stop,
+        {
+            "session_id": "codex-session",
+            "stop_hook_active": False,
+            "transcript_path": str(transcript),
+        },
+        harness="codex",
+        state_dir=tmp_path,
+    )
+    assert result["decision"] == "block"
+    assert result["reason"] == STOP_BLOCK_REASON
+
+
+def test_precompact_codex(tmp_path):
+    """precompact always blocks under the codex harness as well."""
+    result = _capture_hook_output(
+        hook_precompact,
+        {"session_id": "codex-session"},
+        harness="codex",
+        state_dir=tmp_path,
+    )
+    assert result["decision"] == "block"
+    assert result["reason"] == PRECOMPACT_BLOCK_REASON
+
+
+def test_run_hook_codex_dispatch(tmp_path):
+    """run_hook accepts 'codex' as the harness argument."""
+    stdin_data = json.dumps({"session_id": "codex-dispatch"})
+    with patch("sys.stdin", io.StringIO(stdin_data)):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._output") as mock_output:
+                run_hook("session-start", "codex")
+    mock_output.assert_called_once_with({})
