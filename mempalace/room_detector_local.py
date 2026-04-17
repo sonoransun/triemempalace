@@ -9,12 +9,15 @@ Two ways to define rooms without calling any AI:
 No internet. No API key. Your files stay on your machine.
 """
 
+import logging
 import os
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # Common room patterns — detected from folder names and filenames
 # Format: {folder_keyword: room_name}
@@ -117,9 +120,23 @@ def detect_rooms_from_folders(project_dir: str) -> list:
         "coverage",
     }
 
+    def _safe_is_dir(p):
+        # Windows symlinks to untrusted mount points raise OSError
+        # ("WinError 448"); treat as not-a-dir so the walk skips them.
+        try:
+            return p.is_dir()
+        except OSError:
+            return False
+
+    def _safe_iterdir(p):
+        try:
+            return list(p.iterdir())
+        except OSError:
+            return []
+
     # Check top-level directories first (most reliable signal)
-    for item in project_path.iterdir():
-        if item.is_dir() and item.name not in skip_dirs:
+    for item in _safe_iterdir(project_path):
+        if _safe_is_dir(item) and item.name not in skip_dirs:
             name_lower = item.name.lower().replace("-", "_")
             if name_lower in FOLDER_ROOM_MAP:
                 room_name = FOLDER_ROOM_MAP[name_lower]
@@ -132,10 +149,10 @@ def detect_rooms_from_folders(project_dir: str) -> list:
                     found_rooms[clean] = item.name
 
     # Walk one level deeper for nested patterns
-    for item in project_path.iterdir():
-        if item.is_dir() and item.name not in skip_dirs:
-            for subitem in item.iterdir():
-                if subitem.is_dir() and subitem.name not in skip_dirs:
+    for item in _safe_iterdir(project_path):
+        if _safe_is_dir(item) and item.name not in skip_dirs:
+            for subitem in _safe_iterdir(item):
+                if _safe_is_dir(subitem) and subitem.name not in skip_dirs:
                     name_lower = subitem.name.lower().replace("-", "_")
                     if name_lower in FOLDER_ROOM_MAP:
                         room_name = FOLDER_ROOM_MAP[name_lower]

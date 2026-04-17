@@ -115,6 +115,20 @@ class TestCompressionStats:
     def test_count_tokens(self):
         assert Dialect.count_tokens("hello world") == 2
 
+    def test_compression_stats_keys(self):
+        """Verify compression_stats() returns the expected key set."""
+        d = Dialect()
+        stats = d.compression_stats("hello world this is a test", "HW:test")
+        expected_keys = {
+            "original_chars",
+            "summary_chars",
+            "original_tokens_est",
+            "summary_tokens_est",
+            "size_ratio",
+            "note",
+        }
+        assert set(stats.keys()) == expected_keys
+
 
 class TestZettelEncoding:
     def test_encode_zettel(self):
@@ -155,3 +169,24 @@ class TestDecode:
         assert decoded["header"]["file"] == "001"
         assert decoded["arc"] == "journey"
         assert len(decoded["zettels"]) == 1
+
+
+class TestI18nLang:
+    """The optional ``lang=`` parameter loads an i18n pack and swaps the
+    AAAK instruction string + regex patterns. The fr pack ships with
+    real translations so we can compare it against the default."""
+
+    def test_lang_default_loads(self):
+        d = Dialect()
+        assert d.aaak_instruction
+        assert d.lang  # something resolved (default is 'en')
+
+    def test_lang_french_swaps_instruction(self):
+        d_en = Dialect()
+        d_fr = Dialect(lang="fr")
+        assert d_fr.lang == "fr"
+        # The French AAAK instruction must be different from the
+        # default — even just the language tag flip changes the string.
+        assert d_fr.aaak_instruction != d_en.aaak_instruction
+        # Sanity: French instruction mentions 'français' (case-insensitive).
+        assert "français" in d_fr.aaak_instruction.lower()

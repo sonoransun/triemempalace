@@ -456,15 +456,22 @@ def _hybrid_search_single(
     else:
         query_n = n_results
 
+    # Hybrid retrieval: always query drawers directly (the floor), then use
+    # closet hits to boost rankings. Closets are a ranking SIGNAL, never a
+    # GATE — direct drawer search is always the baseline.
+    #
+    # This avoids the "weak-closets regression" where narrative content
+    # produces low-signal closets (regex extraction matches few topics)
+    # and closet-first routing hides drawers that direct search would find.
     try:
-        kwargs = {
+        dkwargs = {
             "query_texts": [query],
             "n_results": query_n,
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
-            kwargs["where"] = where
-        results = col.query(**kwargs)
+            dkwargs["where"] = where
+        results = col.query(**dkwargs)
     except Exception as e:
         # Broad catch: the collection may be a real Chroma handle (raising
         # ChromaError) or a test double (raising RuntimeError / anything).

@@ -29,13 +29,13 @@ Usage:
     python benchmarks/membench_bench.py /tmp/membench/MemData/FirstAgent --limit 50
 """
 
-import sys
+import argparse
 import json
 import re
-import argparse
-from pathlib import Path
-from datetime import datetime
+import sys
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 
 import chromadb
 

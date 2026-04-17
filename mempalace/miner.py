@@ -9,6 +9,7 @@ Stores verbatim chunks as drawers. No summaries. Ever.
 
 import fnmatch
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -288,6 +289,42 @@ def is_force_included(path: Path, project_path: Path, include_paths: set) -> boo
 # =============================================================================
 
 
+_ENTITY_REGISTRY_PATH = str(Path("~/.mempalace/known_entities.json").expanduser())
+_ENTITY_REGISTRY_CACHE: dict = {"mtime": None, "names": frozenset(), "raw": {}}
+
+
+def _load_known_entities_raw() -> dict:
+    """Return the raw ``known_entities.json`` registry for fact-checking.
+
+    Cached by mtime so repeated calls are cheap. Returns ``{}`` when the
+    file is missing or unreadable so callers can degrade gracefully.
+    """
+    path = Path(_ENTITY_REGISTRY_PATH)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        _ENTITY_REGISTRY_CACHE.update({"mtime": None, "names": frozenset(), "raw": {}})
+        return {}
+
+    if _ENTITY_REGISTRY_CACHE["mtime"] == mtime:
+        return _ENTITY_REGISTRY_CACHE["raw"]
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    raw = data if isinstance(data, dict) else {}
+    names: set = set()
+    for cat in raw.values():
+        if isinstance(cat, list):
+            names.update(str(n) for n in cat if n)
+        elif isinstance(cat, dict):
+            names.update(str(k) for k in cat.keys() if k)
+    _ENTITY_REGISTRY_CACHE.update({"mtime": mtime, "names": frozenset(names), "raw": raw})
+    return raw
+
+
 def load_config(project_dir: str) -> dict:
     """Load mempalace.yaml from project directory (falls back to mempal.yaml)."""
     import yaml
@@ -497,11 +534,11 @@ def process_file(
     try:
         content = filepath.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return 0, None
+        return 0, "general"
 
     content = content.strip()
     if len(content) < MIN_CHUNK_SIZE:
-        return 0, None
+        return 0, "general"
 
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
@@ -716,7 +753,8 @@ def status(palace_path: str, *, model: str | None = None):
         return
 
     # Count by wing and room
-    r = col.get(limit=10000, include=["metadatas"])
+    total = col.count()
+    r = col.get(limit=total, include=["metadatas"]) if total else {"metadatas": []}
     metas = r["metadatas"]
 
     wing_rooms = defaultdict(lambda: defaultdict(int))

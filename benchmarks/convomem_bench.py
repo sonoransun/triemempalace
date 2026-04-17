@@ -21,22 +21,18 @@ Usage:
     python benchmarks/convomem_bench.py --mode aaak              # test AAAK compression
 """
 
-import os
-import sys
-import json
-import shutil
-import ssl
-import tempfile
 import argparse
+import json
+import os
+import shutil
+import sys
+import tempfile
 import urllib.request
-from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import chromadb
-
-# Bypass SSL for restricted environments
-ssl._create_default_https_context = ssl._create_unverified_context
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

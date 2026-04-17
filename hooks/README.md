@@ -80,6 +80,28 @@ mempalace mine <dir> --mode convos # Mine conversation transcripts only
 
 The hooks resolve the repo root automatically from their own path, so they work regardless of where you install the repo.
 
+### Config knobs (~/.mempalace/config.json)
+
+Two settings under the `hooks` block change how the save hook
+behaves. Read them via `MempalaceConfig`, set them via the MCP
+`mempalace_hook_settings` tool, or edit `config.json` by hand:
+
+```jsonc
+{
+  "hooks": {
+    "silent_save": true,    // true: hook saves directly without
+                            //       blocking the AI (default).
+                            // false: hook returns a "block" response
+                            //       so the AI files via MCP itself.
+    "desktop_toast": false  // true: also fire a `notify-send` toast
+                            //       so you can see the save happen.
+  }
+}
+```
+
+Both default to MemPalace's recommended values, so palaces created
+without this block continue to work unchanged.
+
 ## How It Works (Technical)
 
 ### Save Hook (Stop event)
@@ -133,6 +155,10 @@ Example output:
 [14:40:01] Session abc123: 18 exchanges, 3 since last save
 ```
 
+## Known Limitations
+
+**Hooks require session restart after install.** Claude Code loads hooks from `settings.json` at session start only. If you run `mempalace init` or manually edit hook config mid-session, the hooks won't fire until you restart Claude Code. This is a Claude Code limitation.
+
 ## Cost
 
-**Zero extra tokens.** The hooks are bash scripts that run locally. They don't call any API. The only "cost" is the AI spending a few seconds organizing memories at each checkpoint — and it's doing that with context it already has loaded.
+**Zero extra tokens.** The hooks notify the AI that saves happened in the background — the AI doesn't need to write anything in the chat. All filing is handled automatically. Previous versions asked the AI to write diary entries and drawer content in the chat window, which cost ~$1/session in retransmitted tokens.

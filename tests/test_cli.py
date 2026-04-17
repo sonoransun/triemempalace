@@ -476,11 +476,18 @@ def test_cmd_repair_no_palace(mock_config_cls, tmp_path, capsys):
     assert "No palace found" in out
 
 
+def _seed_palace_db(palace_dir):
+    """cmd_repair gates on a real chroma.sqlite3 sentinel — the tests
+    don't need a valid DB, just the file's presence."""
+    (palace_dir / "chroma.sqlite3").write_text("")
+
+
 @patch("mempalace.palace_io.open_collection")
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_repair_error_reading(mock_config_cls, mock_open, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
+    _seed_palace_db(palace_dir)
     mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
     mock_open.side_effect = ValueError("corrupt db")
     cmd_repair(argparse.Namespace(palace=None))
@@ -494,6 +501,7 @@ def test_cmd_repair_error_reading(mock_config_cls, mock_open, tmp_path, capsys):
 def test_cmd_repair_zero_drawers(mock_config_cls, mock_open, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
+    _seed_palace_db(palace_dir)
     mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
     mock_col = MagicMock()
     mock_col.count.return_value = 0
@@ -512,6 +520,7 @@ def test_cmd_repair_success(
 ):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
+    _seed_palace_db(palace_dir)
     mock_config_cls.return_value = _config_with_default_models(str(palace_dir))
 
     old_col = MagicMock()
@@ -589,10 +598,11 @@ def test_cmd_compress_dry_run(mock_config_cls, mock_open, capsys):
     mock_dialect.compress.return_value = "compressed"
     mock_dialect.compression_stats.return_value = {
         "original_chars": 100,
-        "compressed_chars": 30,
-        "original_tokens": 25,
-        "compressed_tokens": 8,
-        "ratio": 3.3,
+        "summary_chars": 30,
+        "original_tokens_est": 25,
+        "summary_tokens_est": 8,
+        "size_ratio": 3.3,
+        "note": "Estimates only.",
     }
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
@@ -601,6 +611,7 @@ def test_cmd_compress_dry_run(mock_config_cls, mock_open, capsys):
     out = capsys.readouterr().out
     assert "dry run" in out.lower()
     assert "Compressing" in out
+    assert "Total:" in out
 
 
 @patch("mempalace.palace_io.open_collection")
@@ -647,10 +658,11 @@ def test_cmd_compress_stores_results(mock_config_cls, mock_open, capsys):
     mock_dialect.compress.return_value = "compressed"
     mock_dialect.compression_stats.return_value = {
         "original_chars": 100,
-        "compressed_chars": 30,
-        "original_tokens": 25,
-        "compressed_tokens": 8,
-        "ratio": 3.3,
+        "summary_chars": 30,
+        "original_tokens_est": 25,
+        "summary_tokens_est": 8,
+        "size_ratio": 3.3,
+        "note": "Estimates only.",
     }
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
@@ -794,9 +806,8 @@ def test_cmd_models_unknown_slug_exits(mock_config_cls, capsys):
     args = argparse.Namespace(models_action="enable", slug="not-a-real-slug")
     with patch(
         "mempalace.embeddings.get_spec", side_effect=KeyError("unknown slug not-a-real-slug")
-    ):
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_models(args)
+    ), pytest.raises(SystemExit) as exc_info:
+        cmd_models(args)
     assert exc_info.value.code == 2
 
 
@@ -886,13 +897,11 @@ def test_cmd_models_download_failure_exits(mock_config_cls, capsys):
         mock_spec.return_value = MagicMock(
             slug="fake", backend="fake", extras_required=(), model_id="fake/v1"
         )
-        with patch("mempalace.embeddings.is_installed", return_value=True):
-            with patch(
-                "mempalace.embeddings.load_embedding_function",
-                side_effect=RuntimeError("disk full"),
-            ):
-                with pytest.raises(SystemExit) as exc_info:
-                    cmd_models(args)
+        with patch("mempalace.embeddings.is_installed", return_value=True), patch(
+            "mempalace.embeddings.load_embedding_function",
+            side_effect=RuntimeError("disk full"),
+        ), pytest.raises(SystemExit) as exc_info:
+            cmd_models(args)
     assert exc_info.value.code == 1
 
 

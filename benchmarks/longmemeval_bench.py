@@ -29,15 +29,15 @@ Usage:
     python benchmarks/longmemeval_bench.py data/longmemeval_s_cleaned.json --limit 20
 """
 
-import os
-import sys
-import re
-import json
 import argparse
+import json
 import math
-from pathlib import Path
+import os
+import re
+import sys
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import chromadb
 
@@ -124,8 +124,8 @@ def _make_embed_fn(model_name: str):
     hf_name = MODEL_MAP.get(model_name, model_name)
 
     try:
+        from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
         from fastembed import TextEmbedding
-        from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
 
         class _FastEmbedFn(EmbeddingFunction):
             def __init__(self, name):
@@ -2789,8 +2789,8 @@ def llm_rerank(
     Returns:
         Reordered rankings list with LLM's best pick promoted to rank 1.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     candidates = rankings[:top_k]
     if not candidates:
@@ -2832,7 +2832,6 @@ def llm_rerank(
         method="POST",
     )
 
-    import socket as _socket
 
     for _attempt in range(3):
         try:
@@ -2848,7 +2847,7 @@ def llm_rerank(
                     reordered = [chosen_idx] + [i for i in rankings if i != chosen_idx]
                     return reordered
             break  # Got a response, even if unparseable — don't retry
-        except (_socket.timeout, TimeoutError):
+        except TimeoutError:
             if _attempt < 2:
                 import time as _time
 
@@ -2861,32 +2860,12 @@ def llm_rerank(
 
 
 def _load_api_key(key_arg):
-    """Load API key from --llm-key arg, env var, or ~/.config/lu/keys.json."""
+    """Load API key from --llm-key arg or ANTHROPIC_API_KEY env var."""
     if key_arg:
         return key_arg
     env_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if env_key:
         return env_key
-    keys_path = os.path.expanduser("~/.config/lu/keys.json")
-    if os.path.exists(keys_path):
-        try:
-            with open(keys_path) as f:
-                keys = json.load(f)
-            # Flat string keys
-            for name in ("lu_key", "anthropic_milla", "anthropic_claude_code_main"):
-                val = keys.get(name, "")
-                if isinstance(val, str) and val.startswith("sk-ant-"):
-                    return val
-            # Nested dict: keys["anthropic"]["lu_key"]
-            for section in ("anthropic", "anthropic_milla", "anthropic_claude_code_main"):
-                sec = keys.get(section, {})
-                if isinstance(sec, dict):
-                    for subkey in ("lu_key", "key", "api_key"):
-                        val = sec.get(subkey, "")
-                        if isinstance(val, str) and val.startswith("sk-ant-"):
-                            return val
-        except Exception:
-            pass
     return ""
 
 
@@ -2970,8 +2949,7 @@ def run_benchmark(
         if not api_key:
             print(
                 "ERROR: --llm-rerank / --mode diary requires an API key. "
-                "Set ANTHROPIC_API_KEY, use --llm-key, "
-                "or store in ~/.config/lu/keys.json as 'lu_key'."
+                "Set ANTHROPIC_API_KEY or use --llm-key."
             )
             sys.exit(1)
 
@@ -3290,8 +3268,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--llm-key",
         default="",
-        help="Anthropic API key for LLM re-ranking. Falls back to ANTHROPIC_API_KEY "
-        "env var or ~/.config/lu/keys.json 'lu_key' field if not provided.",
+        help="Anthropic API key for LLM re-ranking. Falls back to ANTHROPIC_API_KEY env var.",
     )
     parser.add_argument(
         "--llm-model",

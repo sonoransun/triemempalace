@@ -218,7 +218,8 @@ def cmd_split(args: argparse.Namespace) -> None:
     from .split_mega_files import main as split_main
 
     # Rebuild argv for split_mega_files argparse
-    argv = ["--source", args.dir]
+    # Expand ~ and resolve to absolute path so split_mega_files sees a real path
+    argv = ["--source", str(Path(args.dir).expanduser().resolve())]
     if args.output_dir:
         argv += ["--output-dir", args.output_dir]
     if args.dry_run:
@@ -276,9 +277,13 @@ def cmd_repair(args: argparse.Namespace) -> None:
 
     config = MempalaceConfig()
     palace_path = str(Path(args.palace).expanduser()) if args.palace else config.palace_path
+    db_path = str(Path(palace_path) / "chroma.sqlite3")
 
     if not Path(palace_path).is_dir():
         print(f"\n  No palace found at {palace_path}")
+        return
+    if not Path(db_path).is_file():
+        print(f"\n  No palace database found at {db_path}")
         return
 
     print(f"\n{'=' * 55}")
@@ -739,7 +744,7 @@ def cmd_compress(args):
         stats = dialect.compression_stats(doc, compressed)
 
         total_original += stats["original_chars"]
-        total_compressed += stats["compressed_chars"]
+        total_compressed += stats["summary_chars"]
 
         compressed_entries.append((doc_id, compressed, meta, stats))
 
@@ -749,7 +754,7 @@ def cmd_compress(args):
             source = Path(meta.get("source_file", "?")).name
             print(f"  [{wing_name}/{room_name}] {source}")
             print(
-                f"    {stats['original_tokens']}t -> {stats['compressed_tokens']}t ({stats['ratio']:.1f}x)"
+                f"    {stats['original_tokens_est']}t -> {stats['summary_tokens_est']}t ({stats['size_ratio']:.1f}x)"
             )
             print(f"    {compressed}")
             print()
@@ -764,8 +769,8 @@ def cmd_compress(args):
             )
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
-                comp_meta["compression_ratio"] = round(stats["ratio"], 1)
-                comp_meta["original_tokens"] = stats["original_tokens"]
+                comp_meta["compression_ratio"] = round(stats["size_ratio"], 1)
+                comp_meta["original_tokens"] = stats["original_tokens_est"]
                 comp_col.upsert(
                     ids=[doc_id],
                     documents=[compressed],
@@ -782,8 +787,9 @@ def cmd_compress(args):
 
     # Summary
     ratio = total_original / max(total_compressed, 1)
-    orig_tokens = Dialect.count_tokens("x" * total_original)
-    comp_tokens = Dialect.count_tokens("x" * total_compressed)
+    # Estimate tokens from char count (~3.8 chars/token for English text)
+    orig_tokens = max(1, int(total_original / 3.8))
+    comp_tokens = max(1, int(total_compressed / 3.8))
     print(f"  Total: {orig_tokens:,}t -> {comp_tokens:,}t ({ratio:.1f}x compression)")
     if args.dry_run:
         print("  (dry run -- nothing stored)")
@@ -807,7 +813,9 @@ def main() -> None:
     p_init = sub.add_parser("init", help="Detect rooms from your folder structure")
     p_init.add_argument("dir", help="Project directory to set up")
     p_init.add_argument(
-        "--yes", action="store_true", help="Auto-accept all detected entities (non-interactive)"
+        "--yes",
+        action="store_true",
+        help="Auto-accept all detected entities (non-interactive)",
     )
 
     # mine
@@ -1104,7 +1112,7 @@ def main() -> None:
     sub.add_parser(
         "repair",
         help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
-    )
+    ).add_argument("--yes", action="store_true", help="Skip confirmation for destructive changes")
 
     # trie-repair
     sub.add_parser(

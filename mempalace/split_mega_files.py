@@ -261,7 +261,7 @@ def main():  # pragma: no cover
     )
     args = parser.parse_args()
 
-    src_dir = Path(args.source) if args.source else LUMI_DIR
+    src_dir = Path(args.source).expanduser().resolve() if args.source else LUMI_DIR
     output_dir = args.output_dir or None  # None = same dir as file
 
     files = [Path(args.file)] if args.file else sorted(src_dir.glob("*.txt"))

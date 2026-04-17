@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .config import MempalaceConfig
 from .palace_io import open_collection
+from .searcher import _build_where as build_where_filter
 
 logger = logging.getLogger("mempalace.layers")
 
@@ -84,6 +85,7 @@ class Layer1:
 
     MAX_DRAWERS = 15  # at most 15 moments in wake-up
     MAX_CHARS = 3200  # hard cap on total L1 text (~800 tokens)
+    MAX_SCAN = 2000  # don't scan more than this for L1 generation
 
     def __init__(self, palace_path: str = None, wing: str = None, model: str = None):
         cfg = MempalaceConfig()
@@ -212,13 +214,7 @@ class Layer2:
             logger.debug("Layer2.retrieve: collection open failed — %s", e)
             return "No palace found."
 
-        where = {}
-        if wing and room:
-            where = {"$and": [{"wing": wing}, {"room": room}]}
-        elif wing:
-            where = {"wing": wing}
-        elif room:
-            where = {"room": room}
+        where = build_where_filter(wing, room)
 
         kwargs = {"include": ["documents", "metadatas"], "limit": n_results}
         if where:
@@ -282,13 +278,7 @@ class Layer3:
             logger.debug("Layer3.search: collection open failed — %s", e)
             return "No palace found."
 
-        where = {}
-        if wing and room:
-            where = {"$and": [{"wing": wing}, {"room": room}]}
-        elif wing:
-            where = {"wing": wing}
-        elif room:
-            where = {"room": room}
+        where = build_where_filter(wing, room)
 
         kwargs = {
             "query_texts": [query],
@@ -342,13 +332,7 @@ class Layer3:
             logger.debug("Layer3.search_raw: collection open failed — %s", e)
             return []
 
-        where = {}
-        if wing and room:
-            where = {"$and": [{"wing": wing}, {"room": room}]}
-        elif wing:
-            where = {"wing": wing}
-        elif room:
-            where = {"room": room}
+        where = build_where_filter(wing, room)
 
         kwargs = {
             "query_texts": [query],

@@ -19,19 +19,19 @@ Usage:
     python benchmarks/locomo_bench.py /path/to/locomo/data/locomo10.json --mode hybrid --llm-rerank
 """
 
-import os
-import sys
-import json
-import re
-import string
-import shutil
-import tempfile
 import argparse
-import urllib.request
+import json
+import os
+import re
+import shutil
+import string
+import sys
+import tempfile
 import urllib.error
-from pathlib import Path
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import chromadb
 
@@ -553,7 +553,6 @@ def llm_rerank_locomo(
         method="POST",
     )
 
-    import socket as _socket
 
     for _attempt in range(3):
         try:
@@ -568,7 +567,7 @@ def llm_rerank_locomo(
                     reordered = [chosen_id] + [cid for cid in retrieved_ids if cid != chosen_id]
                     return reordered
             break
-        except (_socket.timeout, TimeoutError):
+        except TimeoutError:
             if _attempt < 2:
                 import time as _time
 
@@ -580,29 +579,12 @@ def llm_rerank_locomo(
 
 
 def _load_api_key(key_arg):
+    """Load API key from --llm-key arg or ANTHROPIC_API_KEY env var."""
     if key_arg:
         return key_arg
     env_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if env_key:
         return env_key
-    keys_path = os.path.expanduser("~/.config/lu/keys.json")
-    if os.path.exists(keys_path):
-        try:
-            with open(keys_path) as f:
-                keys = json.load(f)
-            for name in ("lu_key", "anthropic_milla", "anthropic_claude_code_main"):
-                val = keys.get(name, "")
-                if isinstance(val, str) and val.startswith("sk-ant-"):
-                    return val
-            for section in ("anthropic", "anthropic_milla", "anthropic_claude_code_main"):
-                sec = keys.get(section, {})
-                if isinstance(sec, dict):
-                    for subkey in ("lu_key", "key", "api_key"):
-                        val = sec.get(subkey, "")
-                        if isinstance(val, str) and val.startswith("sk-ant-"):
-                            return val
-        except Exception:
-            pass
     return ""
 
 
