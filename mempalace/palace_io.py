@@ -55,6 +55,30 @@ _collection_cache: dict[tuple[str, str], Any] = {}
 _lock = threading.Lock()
 
 
+_AGGREGATE_LEVELS = ("wing", "hall", "room")
+_AGGREGATE_LEVEL_PLURAL = {"wing": "wings", "hall": "halls", "room": "rooms"}
+
+
+def aggregate_collection_name_for(slug: str, level: str) -> str:
+    """Return the sidecar collection name for a (model-slug, level) pair.
+
+    Mirrors :func:`mempalace.embeddings.collection_name_for` but targets
+    the wing/hall/room aggregate indices built by
+    :mod:`mempalace.aggregates`.
+
+    Examples::
+
+        aggregate_collection_name_for("default", "room") == "mempalace_rooms"
+        aggregate_collection_name_for("bge-small-en", "hall") == "mempalace_halls__bge_small_en"
+    """
+    if level not in _AGGREGATE_LEVEL_PLURAL:
+        raise ValueError(f"aggregate level must be one of {_AGGREGATE_LEVELS}, got {level!r}")
+    base = f"mempalace_{_AGGREGATE_LEVEL_PLURAL[level]}"
+    if slug == "default":
+        return base
+    return base + "__" + _embeddings.normalize_slug_for_collection(slug)
+
+
 def _resolve_model(model: str | None) -> str:
     """Return the effective model slug.
 

@@ -537,6 +537,33 @@ class TrieIndex:
         with contextlib.suppress(Exception):
             self.close()
 
+    # ── Public meta-DBI accessors ────────────────────────────────────
+    #
+    # The ``meta`` DBI is a scalar key-value store colocated with the
+    # trie's LMDB env. Internal callers write schema version, monotonic
+    # state, counters. External callers (currently
+    # :mod:`mempalace.aggregates`) reuse it for small pieces of
+    # palace-scoped state that want the same transactional / crash
+    # semantics as trie writes without introducing a second storage
+    # backend. Keys must be bytes; values must be bytes. Callers are
+    # responsible for their own key namespacing (e.g. ``b"agg:...``").
+
+    def meta_get(self, key: bytes) -> bytes | None:
+        """Return the raw bytes stored at ``key`` in the meta DBI, or None."""
+        with self._env.begin(write=False) as txn:
+            raw = txn.get(key, db=self._db_meta)
+            return bytes(raw) if raw is not None else None
+
+    def meta_put(self, key: bytes, value: bytes) -> None:
+        """Write ``value`` at ``key`` in the meta DBI (creating or overwriting)."""
+        with self._env.begin(write=True) as txn:
+            txn.put(key, value, db=self._db_meta)
+
+    def meta_delete(self, key: bytes) -> None:
+        """Remove ``key`` from the meta DBI. No-op if absent."""
+        with self._env.begin(write=True) as txn:
+            txn.delete(key, db=self._db_meta)
+
     # ── Meta counter helpers ──────────────────────────────────────────
 
     def _next_counter(self, txn, key: bytes, packer: struct.Struct) -> int:

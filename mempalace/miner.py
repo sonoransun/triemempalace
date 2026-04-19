@@ -485,6 +485,8 @@ def add_drawer(
     :class:`TrieIndex` in a single batch after the file is fully mined —
     this amortizes the SQLite commit across all chunks of a file.
     """
+    from .aggregates import hydrate_drawer_metadata
+
     drawer_id = f"drawer_{wing}_{room}_{hashlib.md5((source_file + str(chunk_index)).encode(), usedforsecurity=False).hexdigest()[:16]}"
     metadata = {
         "wing": wing,
@@ -499,6 +501,7 @@ def add_drawer(
         metadata["source_mtime"] = Path(source_file).stat().st_mtime
     except OSError as e:
         logger.debug("add_drawer: mtime stat failed for %s — %s", source_file, e)
+    hydrate_drawer_metadata(metadata, content)
     collection.upsert(
         documents=[content],
         ids=[drawer_id],
@@ -724,6 +727,17 @@ def mine(
             room_counts[room] += 1
             if not dry_run:
                 print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers}")
+
+    # Mark every container touched by this mine as needing an aggregate
+    # rebuild. Cheap (one LMDB write per distinct room) and deferred —
+    # the actual aggregate vectors are recomputed by the threshold-fired
+    # rebuilder or by `mempalace aggregates rebuild`.
+    if not dry_run and total_drawers > 0:
+        from .aggregates import mark_container_dirty
+
+        for room in room_counts:
+            if room is not None:
+                mark_container_dirty(palace_path, wing=wing, room=room)
 
     print(f"\n{'=' * 55}")
     print("  Done.")

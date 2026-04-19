@@ -66,6 +66,7 @@ def _hit_from_meta(doc: str, meta: dict, distance: float | None) -> dict:
         "text": doc,
         "wing": meta.get("wing", "unknown"),
         "room": meta.get("room", "unknown"),
+        "hall": meta.get("hall"),
         "source_file": Path(meta.get("source_file", "?")).name,
         "similarity": round(1 - distance, 3) if distance is not None else None,
         "filed_at": meta.get("filed_at"),
@@ -146,6 +147,7 @@ def hybrid_search(
     rerank: str | None = None,
     rerank_prune: bool = True,
     enable_kg_ppr: bool = False,
+    aggregate_weights: dict[str, float] | None = None,
 ) -> dict:
     """Combine trie-based keyword/temporal filtering with Chroma vector search.
 
@@ -201,6 +203,7 @@ def hybrid_search(
             room=room,
             n_results=internal_limit,
             enable_kg_ppr=enable_kg_ppr,
+            aggregate_weights=aggregate_weights,
         )
     else:
         result = _hybrid_search_single(
@@ -216,6 +219,7 @@ def hybrid_search(
             n_results=internal_limit,
             model=model,
             enable_kg_ppr=enable_kg_ppr,
+            aggregate_weights=aggregate_weights,
         )
 
     if "error" in result:
@@ -290,6 +294,11 @@ def hybrid_search(
     result["results"] = _strip_internal_fields(compressed_hits)
     result["compression"] = compression_stats
     result["rerank"] = rerank_stats
+    # Drop top-level internal keys (currently ``_agg_boost`` from the
+    # aggregate-fusion pass) before returning to the caller.
+    for k in list(result.keys()):
+        if k.startswith("_"):
+            result.pop(k, None)
     return result
 
 
@@ -307,6 +316,7 @@ def _hybrid_search_single(
     n_results: int,
     model: str | None,
     enable_kg_ppr: bool = False,
+    aggregate_weights: dict[str, float] | None = None,
 ) -> dict:
     """Single-model hybrid search. Called by ``hybrid_search`` and by the
     fan-out path once per enabled model.
@@ -484,12 +494,60 @@ def _hybrid_search_single(
     metas = results.get("metadatas", [[]])[0]
     dists = results.get("distances", [[]])[0]
 
+    # ── Aggregate-level boosts ────────────────────────────────────────
+    # Compute a per-drawer additive boost from the wing/hall/room
+    # aggregate collections and stash it on each hit as ``_agg_boost``.
+    # The fan-out RRF merger consumes ``_agg_boost`` directly; the
+    # single-model path applies it in the final sort below so the
+    # container signal re-ranks drawers before the caller compresses.
+    from . import aggregates as _agg_module
+    from .config import DEFAULT_AGGREGATE_WEIGHTS as _DEFAULT_AGG_WEIGHTS
+    from .config import MempalaceConfig as _Cfg
+
+    cfg_local = _Cfg()
+    if aggregate_weights is None:
+        effective_agg_weights = getattr(cfg_local, "aggregate_weights", _DEFAULT_AGG_WEIGHTS)
+    else:
+        effective_agg_weights = aggregate_weights
+    resolved_slug = model or getattr(cfg_local, "default_embedding_model", "default")
+    agg_boost = _agg_module.aggregate_contributions(
+        query,
+        palace_path,
+        slug=resolved_slug,
+        candidate_ids=candidate_ids,
+        weights=effective_agg_weights,
+    )
+
     hits: list[dict] = []
+    raw_order: list[tuple[str, str, dict, float | None]] = []
     for did, doc, meta, dist in zip(ids, docs, metas, dists, strict=False):
         if candidate_ids is not None and did not in candidate_ids:
             continue
+        raw_order.append((did, doc, meta, dist))
+
+    # When the aggregate layer is live, re-rank by a composite score so
+    # drawers whose wing/hall/room aligns with the query can rise above
+    # drawers with a lone strong vector match. When the aggregate layer
+    # is disabled (empty boost dict) the composite collapses to the
+    # original distance-sorted order, preserving legacy behavior
+    # byte-for-byte.
+    drawer_weight = float(effective_agg_weights.get("drawer", 1.0))
+    if agg_boost:
+        # Chroma returns distances in ascending-similar order, so a low
+        # distance corresponds to a high similarity. Normalize to a
+        # same-direction "score" and fold in the aggregate boost.
+        def _composite(entry):
+            did, _doc, _meta, dist = entry
+            sim = (1.0 - dist) if dist is not None else 0.0
+            return drawer_weight * sim + agg_boost.get(did, 0.0)
+
+        raw_order.sort(key=_composite, reverse=True)
+
+    for did, doc, meta, dist in raw_order:
         hit = _hit_from_meta(doc, meta, distance=dist)
         hit["_drawer_id"] = did  # used by fan-out for RRF; stripped on serialize
+        if agg_boost.get(did, 0.0) > 0:
+            hit["aggregate_boost"] = round(agg_boost[did], 6)
         hits.append(hit)
         if len(hits) >= n_results:
             break
@@ -508,6 +566,7 @@ def _hybrid_search_single(
         ),
         "results": hits,
         "kg_ppr": _serialize_ppr_envelope(kg_ppr_envelope),
+        "_agg_boost": agg_boost,
     }
 
 
@@ -524,6 +583,7 @@ def _hybrid_search_fan_out(
     room: str | None,
     n_results: int,
     enable_kg_ppr: bool = False,
+    aggregate_weights: dict[str, float] | None = None,
 ) -> dict:
     """Cross-model fan-out via Reciprocal Rank Fusion.
 
@@ -551,12 +611,38 @@ def _hybrid_search_fan_out(
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from .config import MempalaceConfig
+    from .config import DEFAULT_AGGREGATE_WEIGHTS, MempalaceConfig
 
     cfg = MempalaceConfig()
     enabled = cfg.enabled_embedding_models
     if not enabled:
         enabled = ["default"]
+
+    # Defensive ``getattr``: tests monkeypatch MempalaceConfig with a
+    # minimal ``_Stub`` that doesn't carry the aggregate-layer knobs,
+    # same pattern used for ``fan_out_max_workers`` below.
+    if aggregate_weights is None:
+        effective_agg_weights = getattr(cfg, "aggregate_weights", DEFAULT_AGGREGATE_WEIGHTS)
+    else:
+        effective_agg_weights = aggregate_weights
+
+    # Auto-rebuild trigger. When the dirty-container count crosses the
+    # configured threshold, fire an async rebuild so the next query
+    # sees fresh aggregates. The rebuild runs in a daemon thread to
+    # avoid blocking the current search — worst case the query uses
+    # the previous generation of aggregates, which is always safe.
+    if getattr(cfg, "aggregate_enabled", False):
+        from . import aggregates as _agg_module
+
+        if _agg_module.should_auto_rebuild(palace_path):
+            import threading
+
+            threading.Thread(
+                target=_agg_module.rebuild_dirty,
+                kwargs={"palace_path": palace_path},
+                daemon=True,
+                name="mempalace.aggregates.rebuild_dirty",
+            ).start()
 
     # Overfetch to give RRF room to work. We'll trim to n_results at the end.
     per_model_limit = max(n_results * 3, 15)
@@ -581,6 +667,7 @@ def _hybrid_search_fan_out(
                 n_results=per_model_limit,
                 model=slug,
                 enable_kg_ppr=enable_kg_ppr,
+                aggregate_weights=effective_agg_weights,
             )
         except (OSError, chromadb.errors.ChromaError, ValueError, KeyError) as e:
             logger.warning("Fan-out: model %s failed: %s", slug, e)
@@ -601,6 +688,8 @@ def _hybrid_search_fan_out(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         per_model: dict[str, dict | None] = dict(executor.map(_run_one, enabled))
 
+    drawer_weight = float(effective_agg_weights.get("drawer", 1.0))
+
     # Merge in the order of the enabled list so RRF ties resolve
     # deterministically regardless of which model finished first.
     fused: dict[str, dict] = {}
@@ -612,7 +701,7 @@ def _hybrid_search_fan_out(
         for rank, hit in enumerate(sub.get("results", [])):
             drawer_id = hit.get("_drawer_id") or (hit["wing"], hit["room"], hit["source_file"])
             key = drawer_id if isinstance(drawer_id, str) else repr(drawer_id)
-            contribution = 1.0 / (_RRF_K + rank)
+            contribution = drawer_weight * (1.0 / (_RRF_K + rank))
 
             existing = fused.get(key)
             if existing is None:
@@ -627,6 +716,21 @@ def _hybrid_search_fan_out(
                 # Prefer the first encountered hit's text/meta (earliest
                 # rank wins); similarity stays whatever the first source
                 # reported.
+
+        # Second pass: fold this slug's aggregate-level boost into the
+        # fused score. Boosts only land on drawers that are already in
+        # the fused pool (i.e. Chroma returned them from at least one
+        # model) — containers can re-rank drawers, never promote
+        # drawers that the direct search never saw.
+        agg_boost = sub.get("_agg_boost") or {}
+        for did, boost in agg_boost.items():
+            entry = fused.get(did)
+            if entry is None:
+                continue
+            entry["score"] += float(boost)
+            entry["hit"]["aggregate_boost"] = round(
+                entry["hit"].get("aggregate_boost", 0.0) + float(boost), 6
+            )
 
     # Sort by RRF score descending and take top ``n_results`` (which is
     # usually an overfetched limit from the outer ``hybrid_search`` —
@@ -739,6 +843,7 @@ def search(
     rerank: str | None = None,
     rerank_prune: bool = True,
     enable_kg_ppr: bool = False,
+    aggregate_weights: dict[str, float] | None = None,
 ):
     """CLI entry point — prints results, raises :class:`SearchError` on failure.
 
@@ -769,6 +874,7 @@ def search(
         rerank=rerank,
         rerank_prune=rerank_prune,
         enable_kg_ppr=enable_kg_ppr,
+        aggregate_weights=aggregate_weights,
     )
 
     if "error" in result:

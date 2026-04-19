@@ -276,6 +276,28 @@ def tool_status() -> dict:
                 {"slug": slug, "drawers": 0, "default": slug == _config.default_embedding_model}
             )
 
+    # Aggregate-layer status: dirty-container counts per level and the
+    # most recent rebuild timestamp. Cheap to compute (one meta DBI
+    # read per level) and only costs ~100 µs when the palace has no
+    # aggregate state yet.
+    aggregates_block = {
+        "enabled": _config.aggregate_enabled,
+        "top_k": _config.aggregate_top_k,
+        "weights": _config.aggregate_weights,
+        "dirty": {"wing": 0, "hall": 0, "room": 0},
+        "last_rebuild": None,
+    }
+    try:
+        from . import aggregates as _agg_module
+
+        dirty = _agg_module.list_dirty(_config.palace_path)
+        aggregates_block["dirty"] = {
+            level: len(dirty.get(level, [])) for level in _agg_module.LEVELS
+        }
+        aggregates_block["last_rebuild"] = _agg_module.latest_rebuilt_any(_config.palace_path)
+    except Exception as e:
+        logger.debug("tool_status: aggregates block failed — %s", e)
+
     return {
         "total_drawers": count,
         "wings": wings,
@@ -284,6 +306,7 @@ def tool_status() -> dict:
         "trie": trie_stats,
         "models": models_block,
         "default_model": _config.default_embedding_model,
+        "aggregates": aggregates_block,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
@@ -466,6 +489,7 @@ def tool_search(
     rerank: str = None,
     rerank_prune: bool = True,
     kg_ppr: bool = False,
+    aggregate_weights: dict = None,
 ):
     """Semantic search against a single model's collection.
 
@@ -483,9 +507,10 @@ def tool_search(
         room = _sanitize_optional_name(room, "room")
     except ValueError as e:
         return {"error": str(e)}
-    if model == "all" or rerank or kg_ppr:
-        # Any rerank/ppr invocation goes through hybrid_search because
-        # search_memories strips the extended envelope fields.
+    if model == "all" or rerank or kg_ppr or aggregate_weights is not None:
+        # Any rerank/ppr/aggregate-weighting invocation goes through
+        # hybrid_search because search_memories strips the extended
+        # envelope fields (aggregate boosts live there).
         return hybrid_search(
             query,
             palace_path=_config.palace_path,
@@ -501,6 +526,7 @@ def tool_search(
             rerank=rerank,
             rerank_prune=rerank_prune,
             enable_kg_ppr=kg_ppr,
+            aggregate_weights=aggregate_weights,
         )
     return search_memories(
         query,
@@ -533,6 +559,7 @@ def tool_hybrid_search(
     rerank: str = None,
     rerank_prune: bool = True,
     kg_ppr: bool = False,
+    aggregate_weights: dict = None,
 ):
     """Keyword + semantic + temporal search.
 
@@ -572,6 +599,7 @@ def tool_hybrid_search(
         rerank=rerank,
         rerank_prune=rerank_prune,
         enable_kg_ppr=kg_ppr,
+        aggregate_weights=aggregate_weights,
     )
 
 
@@ -755,6 +783,8 @@ def tool_add_drawer(
         logger.debug("tool_add_drawer: idempotency probe failed — %s", e)
 
     try:
+        from .aggregates import hydrate_drawer_metadata, mark_container_dirty
+
         metadata = {
             "wing": wing,
             "room": room,
@@ -763,6 +793,7 @@ def tool_add_drawer(
             "added_by": added_by,
             "filed_at": datetime.now(UTC).isoformat(),
         }
+        hydrate_drawer_metadata(metadata, content)
         col.upsert(
             ids=[drawer_id],
             documents=[content],
@@ -772,6 +803,12 @@ def tool_add_drawer(
             _get_trie_index().add_drawer(drawer_id, content, metadata)
         except (lmdb.Error, OSError, ValueError) as e:
             logger.warning("Trie index add failed for %s: %s", drawer_id, e)
+        mark_container_dirty(
+            _config.palace_path,
+            wing=metadata.get("wing"),
+            hall=metadata.get("hall"),
+            room=metadata.get("room"),
+        )
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
         return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
     except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
@@ -807,6 +844,17 @@ def tool_delete_drawer(drawer_id: str) -> dict:
             _get_trie_index().delete_drawer(drawer_id)
         except (lmdb.Error, OSError, ValueError) as e:
             logger.warning("Trie index delete failed for %s: %s", drawer_id, e)
+        # The container the deleted drawer belonged to now has stale
+        # aggregates — mark it dirty so the next rebuild evicts the
+        # drawer's text from the aggregate document.
+        from .aggregates import mark_container_dirty
+
+        mark_container_dirty(
+            _config.palace_path,
+            wing=deleted_meta.get("wing"),
+            hall=deleted_meta.get("hall"),
+            room=deleted_meta.get("room"),
+        )
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
     except (chromadb.errors.ChromaError, ValueError, KeyError) as e:
@@ -1034,6 +1082,72 @@ def tool_kg_stats() -> dict:
     return _kg.stats()
 
 
+# ==================== AGGREGATES ====================
+
+
+def tool_aggregates_rebuild(
+    level: str = None,
+    container: str = None,
+    all_containers: bool = False,
+    model: str = None,
+) -> dict:
+    """Rebuild wing/hall/room aggregate embeddings.
+
+    With no args, rebuilds every currently-dirty container. Pass
+    ``level`` + ``container`` to rebuild one specific aggregate, or
+    ``all_containers=True`` to rebuild the entire palace from scratch
+    (slower; useful after bulk ingests). ``model`` optionally scopes
+    the rebuild to one embedding-model slug; omit to rebuild every
+    enabled slug.
+    """
+    from . import aggregates as _agg
+
+    slugs = [model] if model else None
+    if level and container:
+        if level not in _agg.LEVELS:
+            return {
+                "error": f"level must be one of {_agg.LEVELS}",
+                "hint": "retry with level=wing/hall/room and a container name",
+            }
+        effective_slugs = slugs or (_config.enabled_embedding_models or ["default"])
+        written = 0
+        for s in effective_slugs:
+            written += _agg.rebuild_containers(
+                _config.palace_path, level=level, containers=[container], slug=s
+            )
+        _agg.clear_dirty(_config.palace_path, level, [container])
+        return {
+            "rebuilt": written,
+            "by_level": {level: written},
+            "slugs": effective_slugs,
+        }
+
+    if all_containers:
+        result = _agg.rebuild_all(_config.palace_path, slugs=slugs)
+    else:
+        result = _agg.rebuild_dirty(_config.palace_path, slugs=slugs)
+    return {
+        "rebuilt": result["total"],
+        "by_level": result["by_level"],
+        "slugs": result["slugs"],
+    }
+
+
+def tool_aggregates_status() -> dict:
+    """Return dirty-container counts and the last rebuild timestamp."""
+    from . import aggregates as _agg
+
+    dirty = _agg.list_dirty(_config.palace_path)
+    return {
+        "enabled": _config.aggregate_enabled,
+        "top_k": _config.aggregate_top_k,
+        "weights": _config.aggregate_weights,
+        "dirty": {level: len(dirty.get(level, [])) for level in _agg.LEVELS},
+        "dirty_containers": dirty,
+        "last_rebuild": _agg.latest_rebuilt_any(_config.palace_path),
+    }
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -1092,6 +1206,17 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general") -> dic
             _get_trie_index().add_drawer(entry_id, entry, metadata)
         except (lmdb.Error, OSError, ValueError) as e:
             logger.warning("Trie index add failed for diary entry %s: %s", entry_id, e)
+        # Diary entries are sentinel-skipped inside mark_container_dirty
+        # (room="diary" and hall="hall_diary"), but we still register
+        # the wing so wing-level aggregates stay live.
+        from .aggregates import mark_container_dirty
+
+        mark_container_dirty(
+            _config.palace_path,
+            wing=metadata.get("wing"),
+            hall=metadata.get("hall"),
+            room=metadata.get("room"),
+        )
         logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
         return {
             "success": True,
@@ -1481,10 +1606,64 @@ TOOLS = {
                         "kg-extract."
                     ),
                 },
+                "aggregate_weights": {
+                    "type": "object",
+                    "description": (
+                        "Per-level RRF weight multipliers for "
+                        "hierarchical aggregate retrieval. Keys: "
+                        "'drawer' (base direct-hit weight, default 1.0), "
+                        "'room' / 'hall' / 'wing' (container-aggregate "
+                        "weights, defaults 0.3/0.2/0.1). Omit to use "
+                        "palace defaults; pass {'drawer': 1.0, 'wing': 0, "
+                        "'hall': 0, 'room': 0} to disable aggregates for "
+                        "one query without touching config."
+                    ),
+                },
             },
             "required": ["query"],
         },
         "handler": tool_search,
+    },
+    "mempalace_aggregates_rebuild": {
+        "description": (
+            "Recompute wing/hall/room aggregate embeddings. With no "
+            "args, rebuilds every currently-dirty container. Pass "
+            "`level` + `container` to rebuild one specific aggregate, "
+            "or `all_containers=true` to rebuild everything from "
+            "scratch."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": ["wing", "hall", "room"],
+                    "description": "Which taxonomic level to rebuild (requires container)",
+                },
+                "container": {
+                    "type": "string",
+                    "description": "Container name to rebuild (e.g. 'wing_auth', 'hall_technical')",
+                },
+                "all_containers": {
+                    "type": "boolean",
+                    "description": "Rebuild every container in the palace (slower)",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Scope to one embedding-model slug (default: all enabled)",
+                },
+            },
+        },
+        "handler": tool_aggregates_rebuild,
+    },
+    "mempalace_aggregates_status": {
+        "description": (
+            "Report dirty/clean aggregate counts per level, the last "
+            "rebuild timestamp, and the currently-configured "
+            "aggregate weights."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_aggregates_status,
     },
     "mempalace_hybrid_search": {
         "description": (
@@ -1593,6 +1772,14 @@ TOOLS = {
                     "description": (
                         "Enable HippoRAG PPR fusion over the knowledge "
                         "graph. See mempalace_search for full details."
+                    ),
+                },
+                "aggregate_weights": {
+                    "type": "object",
+                    "description": (
+                        "Per-level RRF weight multipliers for "
+                        "hierarchical aggregate retrieval. See "
+                        "mempalace_search for details."
                     ),
                 },
             },

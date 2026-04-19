@@ -92,6 +92,16 @@ DEFAULT_TOPIC_WINGS = [
     "creative",
 ]
 
+# Hierarchical-aggregate retrieval. Container-level (wing / hall / room)
+# embeddings augment drawer search via weighted RRF fusion. Weights are
+# intentionally conservative so the aggregate signal augments the drawer
+# signal rather than overpowering it; users who want more aggressive
+# container boosting can override in config.json.
+DEFAULT_AGGREGATE_WEIGHTS = {"drawer": 1.0, "room": 0.3, "hall": 0.2, "wing": 0.1}
+DEFAULT_AGGREGATE_TOP_K = 10
+DEFAULT_AGGREGATE_REBUILD_THRESHOLD = 20
+DEFAULT_AGGREGATE_ENABLED = True
+
 DEFAULT_HALL_KEYWORDS = {
     "emotions": [
         "scared",
@@ -255,6 +265,60 @@ class MempalaceConfig:
         return int(self._file_config.get("fan_out_max_workers", 8))
 
     @property
+    def aggregate_enabled(self) -> bool:
+        """Whether hierarchical wing/hall/room aggregate retrieval is on.
+
+        When enabled, search queries are also run against per-container
+        aggregate collections (``mempalace_wings`` / ``mempalace_halls``
+        / ``mempalace_rooms``) and the resulting container similarities
+        are weighted into the RRF score of every member drawer. See
+        :mod:`mempalace.aggregates`.
+        """
+        env_val = os.environ.get("MEMPALACE_AGGREGATE_ENABLED")
+        if env_val is not None:
+            return env_val.lower() in ("1", "true", "yes", "on")
+        return bool(self._file_config.get("aggregate_enabled", DEFAULT_AGGREGATE_ENABLED))
+
+    @property
+    def aggregate_weights(self) -> dict[str, float]:
+        """Per-level RRF weight multipliers for aggregate fusion.
+
+        Missing keys fall back to defaults. Negative / NaN values are
+        clamped to 0 so an accidental config typo can't produce a
+        monotonically-decreasing RRF score.
+        """
+        raw = self._file_config.get("aggregate_weights") or {}
+        merged = dict(DEFAULT_AGGREGATE_WEIGHTS)
+        merged.update({k: v for k, v in raw.items() if isinstance(v, int | float)})
+        out: dict[str, float] = {}
+        for k, v in merged.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                f = 0.0
+            if f != f or f < 0:  # NaN or negative
+                f = 0.0
+            out[k] = f
+        return out
+
+    @property
+    def aggregate_top_k(self) -> int:
+        """Number of representative drawers concatenated per aggregate."""
+        return max(1, int(self._file_config.get("aggregate_top_k", DEFAULT_AGGREGATE_TOP_K)))
+
+    @property
+    def aggregate_rebuild_threshold(self) -> int:
+        """Dirty-container count that triggers an async rebuild on next search."""
+        return max(
+            0,
+            int(
+                self._file_config.get(
+                    "aggregate_rebuild_threshold", DEFAULT_AGGREGATE_REBUILD_THRESHOLD
+                )
+            ),
+        )
+
+    @property
     def default_rerank_mode(self) -> str | None:
         """Default cross-encoder reranker slug for search, or None.
 
@@ -339,6 +403,10 @@ class MempalaceConfig:
                 "collection_name": DEFAULT_COLLECTION_NAME,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
+                "aggregate_enabled": DEFAULT_AGGREGATE_ENABLED,
+                "aggregate_weights": DEFAULT_AGGREGATE_WEIGHTS,
+                "aggregate_top_k": DEFAULT_AGGREGATE_TOP_K,
+                "aggregate_rebuild_threshold": DEFAULT_AGGREGATE_REBUILD_THRESHOLD,
             }
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)

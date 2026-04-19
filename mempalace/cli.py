@@ -273,6 +273,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
 
     import chromadb.errors
 
+    from .aggregates import hydrate_drawer_metadata
     from .palace_io import delete_collection, drop_collection_cache, open_collection
 
     config = MempalaceConfig()
@@ -333,6 +334,15 @@ def cmd_repair(args: argparse.Namespace) -> None:
         drop_collection_cache(palace_path)
         new_col = open_collection(palace_path, model=slug, create=True)
 
+        # Backfill ``hall`` on every drawer during re-file so old palaces
+        # gain the new metadata field without a separate pass. Preserves
+        # any pre-set hall (e.g. ``hall_diary`` from diary entries).
+        backfilled = 0
+        for j, meta in enumerate(all_metas):
+            if isinstance(meta, dict) and not meta.get("hall"):
+                hydrate_drawer_metadata(meta, all_docs[j] or "")
+                backfilled += 1
+
         filed = 0
         for i in range(0, len(all_ids), batch_size):
             batch_ids = all_ids[i : i + batch_size]
@@ -341,6 +351,8 @@ def cmd_repair(args: argparse.Namespace) -> None:
             new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
             filed += len(batch_ids)
             print(f"  [{slug}] re-filed {filed}/{len(all_ids)} drawers...")
+        if backfilled:
+            print(f"  [{slug}] backfilled hall metadata on {backfilled} drawer(s)")
 
         grand_total += filed
         last_rebuilt_col = new_col
@@ -366,6 +378,27 @@ def cmd_repair(args: argparse.Namespace) -> None:
         # side fails.
         print(f"  Trie rebuild skipped: {e}")
 
+    # Rebuild the hierarchical aggregate collections. Uses the just-
+    # rebuilt drawer metadata (including the backfilled ``hall`` field)
+    # so every wing/hall/room that contains at least one drawer ends
+    # up with a fresh aggregate embedding. Gated by --rebuild-aggregates
+    # (default on); users who don't want aggregates can skip the pass.
+    if getattr(args, "rebuild_aggregates", True):
+        try:
+            from . import aggregates as _agg_module
+
+            print("\n  Rebuilding wing/hall/room aggregate embeddings...")
+            agg_result = _agg_module.rebuild_all(palace_path)
+            print(
+                f"  Aggregates: {agg_result['total']} containers "
+                f"(wings={agg_result['by_level']['wing']} "
+                f"halls={agg_result['by_level']['hall']} "
+                f"rooms={agg_result['by_level']['room']}) "
+                f"across {len(agg_result['slugs'])} model(s)"
+            )
+        except Exception as e:
+            print(f"  Aggregate rebuild skipped: {e}")
+
     print(f"\n  Repair complete. {grand_total} drawers rebuilt.")
     print(f"  Backup saved at {backup_path}")
     print(f"\n{'=' * 55}\n")
@@ -385,6 +418,99 @@ def _remove_legacy_sqlite_trie(palace_path: str) -> None:
             print(f"  Removed legacy trie file: {legacy}")
         except OSError as e:
             print(f"  Could not remove legacy trie file {legacy}: {e}")
+
+
+def cmd_aggregates(args: argparse.Namespace) -> None:
+    """Dispatch the ``mempalace aggregates`` sub-action.
+
+    Sub-actions:
+      rebuild      — recompute and upsert wing/hall/room aggregate
+                     embeddings for every dirty container (or all
+                     containers with ``--all``).
+      status       — show dirty/clean counts per level and the most
+                     recent rebuild timestamp.
+    """
+    from . import aggregates as _agg
+
+    palace_path = (
+        str(Path(args.palace).expanduser()) if args.palace else MempalaceConfig().palace_path
+    )
+    action = getattr(args, "aggregates_action", None)
+
+    if action == "status":
+        dirty = _agg.list_dirty(palace_path)
+        last = _agg.latest_rebuilt_any(palace_path)
+        cfg = MempalaceConfig()
+        print(f"\n{'=' * 55}")
+        print("  MemPalace Aggregates — Status")
+        print(f"{'=' * 55}")
+        print(f"  Palace:   {palace_path}")
+        print(f"  Enabled:  {cfg.aggregate_enabled}")
+        print(f"  Top-K:    {cfg.aggregate_top_k}")
+        print(f"  Threshold:{cfg.aggregate_rebuild_threshold}")
+        print(f"  Weights:  {cfg.aggregate_weights}")
+        print("  Dirty:")
+        for level in _agg.LEVELS:
+            print(f"    {level:8} {len(dirty.get(level, [])):4}")
+        print(f"  Last rebuild: {last or 'never'}")
+        print(f"{'=' * 55}\n")
+        return
+
+    if action == "rebuild":
+        slug = getattr(args, "model", None)
+        slugs = [slug] if slug else None
+
+        specific = []
+        for level, attr in (("wing", "wing"), ("hall", "hall"), ("room", "room")):
+            value = getattr(args, attr, None)
+            if value:
+                specific.append((level, value))
+
+        if getattr(args, "all", False):
+            print("  Rebuilding every container in the palace...")
+            if getattr(args, "dry_run", False):
+                dirty = _agg.list_dirty(palace_path)
+                print(
+                    f"  (dry-run) would rebuild dirty={sum(len(v) for v in dirty.values())} "
+                    "plus every container reachable via drawer metadata."
+                )
+                return
+            result = _agg.rebuild_all(palace_path, slugs=slugs)
+        elif specific:
+            if getattr(args, "dry_run", False):
+                print(f"  (dry-run) would rebuild containers: {specific}")
+                return
+            by_level: dict[str, int] = {level: 0 for level in _agg.LEVELS}
+            slugs_list = slugs or (MempalaceConfig().enabled_embedding_models or ["default"])
+            for level, container in specific:
+                for s in slugs_list:
+                    by_level[level] += _agg.rebuild_containers(
+                        palace_path, level=level, containers=[container], slug=s
+                    )
+                _agg.clear_dirty(palace_path, level, [container])
+            result = {"by_level": by_level, "total": sum(by_level.values()), "slugs": slugs_list}
+        else:
+            dirty = _agg.list_dirty(palace_path)
+            total_dirty = sum(len(v) for v in dirty.values())
+            if total_dirty == 0:
+                print("  No dirty containers. Nothing to rebuild.")
+                return
+            if getattr(args, "dry_run", False):
+                print(f"  (dry-run) would rebuild {total_dirty} dirty containers.")
+                for level in _agg.LEVELS:
+                    print(f"    {level}: {dirty.get(level, [])}")
+                return
+            result = _agg.rebuild_dirty(palace_path, slugs=slugs)
+
+        print(f"\n  Rebuilt: {result['total']}")
+        for level, n in result["by_level"].items():
+            print(f"    {level:8} {n}")
+        print(f"  Slugs: {', '.join(result['slugs'])}")
+        return
+
+    # No action specified — print usage hint.
+    print("  Usage: mempalace aggregates {rebuild|status}")
+    sys.exit(2)
 
 
 def cmd_models(args: argparse.Namespace) -> None:
@@ -1109,15 +1235,60 @@ def main() -> None:
         instructions_sub.add_parser(instr_name, help=f"Output {instr_name} instructions")
 
     # repair
-    sub.add_parser(
+    p_repair = sub.add_parser(
         "repair",
         help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
-    ).add_argument("--yes", action="store_true", help="Skip confirmation for destructive changes")
+    )
+    p_repair.add_argument(
+        "--yes", action="store_true", help="Skip confirmation for destructive changes"
+    )
+    p_repair.add_argument(
+        "--rebuild-aggregates",
+        dest="rebuild_aggregates",
+        action="store_true",
+        default=True,
+        help="Rebuild wing/hall/room aggregate embeddings after repair (default)",
+    )
+    p_repair.add_argument(
+        "--no-rebuild-aggregates",
+        dest="rebuild_aggregates",
+        action="store_false",
+        help="Skip aggregate rebuild after repair",
+    )
 
     # trie-repair
     sub.add_parser(
         "trie-repair",
         help="Rebuild only the trie index from the existing Chroma collection",
+    )
+
+    # aggregates
+    p_aggregates = sub.add_parser(
+        "aggregates",
+        help="Manage hierarchical wing/hall/room aggregate embeddings",
+    )
+    aggregates_sub = p_aggregates.add_subparsers(dest="aggregates_action")
+    aggregates_sub.add_parser(
+        "status",
+        help="Show dirty/clean aggregate counts and last rebuild timestamp",
+    )
+    p_agg_rebuild = aggregates_sub.add_parser(
+        "rebuild",
+        help="Recompute wing/hall/room aggregate embeddings",
+    )
+    p_agg_rebuild.add_argument("--wing", default=None, help="Rebuild one wing aggregate")
+    p_agg_rebuild.add_argument("--hall", default=None, help="Rebuild one hall aggregate")
+    p_agg_rebuild.add_argument("--room", default=None, help="Rebuild one room aggregate")
+    p_agg_rebuild.add_argument(
+        "--all", action="store_true", help="Rebuild every container in the palace"
+    )
+    p_agg_rebuild.add_argument(
+        "--model",
+        default=None,
+        help="Rebuild aggregates for a specific model slug (default: every enabled slug)",
+    )
+    p_agg_rebuild.add_argument(
+        "--dry-run", action="store_true", help="Show what would be rebuilt without writing"
     )
 
     # models
@@ -1209,6 +1380,10 @@ def main() -> None:
 
     if args.command == "models":
         cmd_models(args)
+        return
+
+    if args.command == "aggregates":
+        cmd_aggregates(args)
         return
 
     if args.command == "rerankers":

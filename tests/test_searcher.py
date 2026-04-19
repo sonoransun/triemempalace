@@ -493,3 +493,107 @@ class TestFanOutParallelism:
         assert "d_good" in drawer_ids
         assert "d_also-good" in drawer_ids
         assert "d_broken" not in drawer_ids
+
+
+# ── Hierarchical aggregate retrieval ──────────────────────────────────
+
+
+class TestAggregateBoost:
+    """Wing / hall / room aggregate fusion tests.
+
+    The seeded_collection fixture already hall-splits drawers across
+    two wings (``project`` / ``notes``) and three rooms (``backend``,
+    ``frontend``, ``planning``). We build aggregates off it and check
+    that (a) the contribution helper pulls drawer ids out of the
+    aggregate collection, (b) hits get an ``aggregate_boost`` field
+    when the query aligns with a container, (c) the trie prefilter
+    still gates the boost.
+    """
+
+    def _build(self, palace_path):
+        from mempalace import aggregates as agg
+
+        return agg.rebuild_all(palace_path)
+
+    def test_rebuild_all_writes_aggregates(self, palace_path, seeded_collection):
+        result = self._build(palace_path)
+        # Two wings × 3 rooms × 1 default model = 5 containers built
+        # (some halls may also show up now that hydrate runs on every
+        # new write — existing seeded drawers don't have the field).
+        assert result["total"] >= 5
+        assert result["by_level"]["wing"] >= 2
+        assert result["by_level"]["room"] >= 3
+
+    def test_contributions_are_populated_after_build(self, palace_path, seeded_collection):
+        from mempalace import aggregates as agg
+
+        self._build(palace_path)
+        boosts = agg.aggregate_contributions(
+            "authentication",
+            palace_path,
+            slug="default",
+        )
+        # At least one drawer should receive a boost — authentication
+        # lives in project/backend and the aggregate for that room will
+        # match semantically.
+        assert isinstance(boosts, dict)
+        assert len(boosts) > 0
+        assert all(v > 0 for v in boosts.values())
+
+    def test_hybrid_search_exposes_aggregate_boost(
+        self, palace_path, seeded_collection, seeded_trie
+    ):
+        self._build(palace_path)
+        result = hybrid_search("authentication jwt", palace_path, n_results=3)
+        assert "error" not in result
+        # At least one hit should have received an aggregate boost.
+        boosted = [h for h in result["results"] if h.get("aggregate_boost")]
+        assert len(boosted) >= 1
+
+    def test_trie_prefilter_gates_aggregate_boost(
+        self, palace_path, seeded_collection, seeded_trie
+    ):
+        self._build(palace_path)
+        # Restrict to a keyword that only the auth drawer has (``jwt``).
+        # Every other drawer must be excluded from both the hit list
+        # and the aggregate boost.
+        result = hybrid_search(
+            "authentication tokens",
+            palace_path,
+            keywords=["jwt"],
+            n_results=5,
+        )
+        assert "error" not in result
+        # Every surviving hit should mention JWT (the trie AND'd it in).
+        assert all("jwt" in h["text"].lower() for h in result["results"])
+
+    def test_disabling_removes_aggregate_boost(
+        self, palace_path, seeded_collection, seeded_trie, monkeypatch
+    ):
+        self._build(palace_path)
+        monkeypatch.setenv("MEMPALACE_AGGREGATE_ENABLED", "false")
+        result = hybrid_search("authentication", palace_path, n_results=3)
+        assert "error" not in result
+        assert all(not h.get("aggregate_boost") for h in result["results"])
+
+    def test_hall_is_surfaced_in_hits(self, palace_path, seeded_collection):
+        # After rebuild_all, the primary collection is left untouched,
+        # so existing seeded drawers won't have ``hall`` unless they
+        # were backfilled via repair. But newly-added drawers carry
+        # ``hall`` automatically — exercise that path here.
+        from mempalace.mcp_server import _config, tool_add_drawer
+
+        # Point mcp_server at the test palace for this one call.
+        _config._file_config["palace_path"] = palace_path
+        tool_add_drawer(
+            wing="project",
+            room="backend",
+            content="The python api returned a 500 error.",
+            source_file="debug.log",
+            added_by="test",
+        )
+        result = hybrid_search("api error", palace_path, n_results=3)
+        assert "error" not in result
+        halls = [h.get("hall") for h in result["results"]]
+        # At least one hit should have a hall set via hydrate.
+        assert any(h is not None for h in halls)

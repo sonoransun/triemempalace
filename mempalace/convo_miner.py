@@ -63,6 +63,7 @@ def _register_file(collection, source_file: str, wing: str, agent: str):
             {
                 "wing": wing,
                 "room": "_registry",
+                "hall": "hall_registry",
                 "source_file": source_file,
                 "added_by": agent,
                 "filed_at": datetime.now().isoformat(),
@@ -310,28 +311,30 @@ def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extr
         except Exception:
             pass
 
+        from .aggregates import hydrate_drawer_metadata
+
         for chunk in chunks:
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts_delta[chunk_room] += 1
             drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+            meta = {
+                "wing": wing,
+                "room": chunk_room,
+                "source_file": source_file,
+                "chunk_index": chunk["chunk_index"],
+                "added_by": agent,
+                "filed_at": datetime.now().isoformat(),
+                "ingest_mode": "convos",
+                "extract_mode": extract_mode,
+                "normalize_version": NORMALIZE_VERSION,
+            }
+            hydrate_drawer_metadata(meta, chunk["content"])
             try:
                 collection.upsert(
                     documents=[chunk["content"]],
                     ids=[drawer_id],
-                    metadatas=[
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": datetime.now().isoformat(),
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                            "normalize_version": NORMALIZE_VERSION,
-                        }
-                    ],
+                    metadatas=[meta],
                 )
                 drawers_added += 1
             except Exception as e:
@@ -446,6 +449,8 @@ def mine_convos(
             room_counts[room] += 1
 
         # File each chunk
+        from .aggregates import hydrate_drawer_metadata
+
         drawers_added = 0
         trie_buffer: list = []
         for chunk in chunks:
@@ -463,6 +468,7 @@ def mine_convos(
                 "ingest_mode": "convos",
                 "extract_mode": extract_mode,
             }
+            hydrate_drawer_metadata(metadata, chunk["content"])
             try:
                 collection.add(
                     documents=[chunk["content"]],
@@ -483,6 +489,16 @@ def mine_convos(
 
         total_drawers += drawers_added
         print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
+
+    # Mark aggregate containers dirty for every room touched by this mine,
+    # so a subsequent search or `mempalace aggregates rebuild` picks up
+    # fresh wing/hall/room vectors.
+    if not dry_run and total_drawers > 0:
+        from .aggregates import mark_container_dirty
+
+        for room_name in room_counts:
+            if room_name:
+                mark_container_dirty(palace_path, wing=wing, room=room_name)
 
     print(f"\n{'=' * 55}")
     print("  Done.")
